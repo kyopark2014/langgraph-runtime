@@ -11,6 +11,7 @@ import logging
 import argparse
 import base64
 import ipaddress
+import re
 import subprocess
 import shutil
 import os
@@ -22,9 +23,9 @@ import urllib.request
 import urllib.error
 
 # Configuration
-project_name = "agent-runtime" # at least 3 characters
+project_name = "langgraph-runtime" # at least 3 characters
 region = "us-west-2"
-git_name = "agent-runtime"
+git_name = "langgraph-runtime"
 
 sts_client = boto3.client("sts", region_name=region)
 account_id = sts_client.get_caller_identity()["Account"]
@@ -3210,6 +3211,22 @@ def _application_config_path() -> str:
     return os.path.join(project_root, "application", "config.json")
 
 
+def _project_root() -> str:
+    return os.path.dirname(os.path.abspath(__file__))
+
+
+def sync_application_capability_lists() -> None:
+    """Copy runtime_agent/langgraph/*.list into application/ before container build."""
+    for filename in ("mcp.list", "skills.list"):
+        src = os.path.join(_project_root(), "runtime_agent", "langgraph", filename)
+        dst = os.path.join(_project_root(), "application", filename)
+        if not os.path.isfile(src):
+            raise FileNotFoundError(f"Missing capability list: {src}")
+        os.makedirs(os.path.dirname(dst), exist_ok=True)
+        shutil.copy2(src, dst)
+        logger.info(f"  ✓ Synced {filename}: {src} -> {dst}")
+
+
 def write_application_config(config_data: Dict, *, merge_existing: bool = True) -> bool:
     """Write application/config.json for local development and ECS runtime."""
     config_path = _application_config_path()
@@ -4565,6 +4582,7 @@ def main():
         logger.info(f"CloudFront distribution created...")
         
         # 8. Build and push Docker image to ECR, then deploy ECS service
+        sync_application_capability_lists()
         app_environment = build_app_environment(
             knowledge_base_role_arn,
             opensearch_info,

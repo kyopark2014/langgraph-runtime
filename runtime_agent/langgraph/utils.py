@@ -4,6 +4,7 @@ import json
 import traceback
 import boto3
 import os
+from langchain_community.utilities.tavily_search import TavilySearchAPIWrapper
 
 logging.basicConfig(
     level=logging.INFO,  # Default to INFO level
@@ -14,36 +15,81 @@ logging.basicConfig(
 )
 logger = logging.getLogger("utils")
 
+workingDir = os.path.dirname(os.path.abspath(__file__))
+config_path = os.path.join(workingDir, "config.json")
+    
 def load_config():
     config = None
-    
-    script_dir = os.path.dirname(os.path.abspath(__file__))
-    config_path = os.path.join(script_dir, "config.json")
-    
-    with open(config_path, "r", encoding="utf-8") as f:
-        config = json.load(f)
-    
+
+    try: 
+        with open(config_path, "r", encoding="utf-8") as f:
+            config = json.load(f)
+    except Exception as e:
+        logger.error(f"Error loading config: {e}")
+        config = {}
+
+        session = boto3.Session()
+        region = session.region_name
+        config['region'] = region
+        config['projectName'] = "power-trade"
+        
+        sts = boto3.client("sts")
+        response = sts.get_caller_identity()
+        accountId = response["Account"]
+        config['accountId'] = accountId
+        
+        with open(config_path, "w", encoding="utf-8") as f:
+            json.dump(config, f, indent=2)    
     return config
 
 config = load_config()
 
-bedrock_region = config['region']
-accountId = config['accountId']
-projectName = config['projectName']
-agent_runtime_role = config['agent_runtime_role']
+accountId = config.get('accountId')
+if not accountId:
+    sts = boto3.client("sts")
+    response = sts.get_caller_identity()
+    accountId = response["Account"]
+    config['accountId'] = accountId
+    with open(config_path, "w", encoding="utf-8") as f:
+        json.dump(config, f, indent=2)
 
-def load_mcp_env():
-    script_dir = os.path.dirname(os.path.abspath(__file__))
-    mcp_env_path = os.path.join(script_dir, "mcp.env")
-    
-    with open(mcp_env_path, "r", encoding="utf-8") as f:
-        mcp_env = json.load(f)
-    return mcp_env
+bedrock_region = config.get('region', 'us-west-2')
+logger.info(f"bedrock_region: {bedrock_region}")
+projectName = config.get('projectName', 'power-trade')
+logger.info(f"projectName: {projectName}")
 
-def save_mcp_env(mcp_env):
-    script_dir = os.path.dirname(os.path.abspath(__file__))
-    mcp_env_path = os.path.join(script_dir, "mcp.env")
-    
-    with open(mcp_env_path, "w", encoding="utf-8") as f:
-        json.dump(mcp_env, f)
+def get_contents_type(file_name):
+    if file_name.lower().endswith((".jpg", ".jpeg")):
+        content_type = "image/jpeg"
+    elif file_name.lower().endswith((".pdf")):
+        content_type = "application/pdf"
+    elif file_name.lower().endswith((".txt")):
+        content_type = "text/plain"
+    elif file_name.lower().endswith((".csv")):
+        content_type = "text/csv"
+    elif file_name.lower().endswith((".ppt", ".pptx")):
+        content_type = "application/vnd.ms-powerpoint"
+    elif file_name.lower().endswith((".doc", ".docx")):
+        content_type = "application/msword"
+    elif file_name.lower().endswith((".xls")):
+        content_type = "application/vnd.ms-excel"
+    elif file_name.lower().endswith((".py")):
+        content_type = "text/x-python"
+    elif file_name.lower().endswith((".js")):
+        content_type = "application/javascript"
+    elif file_name.lower().endswith((".md")):
+        content_type = "text/markdown"
+    elif file_name.lower().endswith((".png")):
+        content_type = "image/png"
+    else:
+        content_type = "no info"    
+    return content_type
 
+# api key to use Tavily Search
+tavily_key = config.get("tavily_api_key", "")
+if tavily_key:
+    os.environ["TAVILY_API_KEY"] = tavily_key
+    tavily_api_wrapper = TavilySearchAPIWrapper(tavily_api_key=tavily_key)
+    logger.info("tavily_key loaded from config.json")
+else:
+    logger.info("tavily_key is not set.")

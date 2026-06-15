@@ -9,8 +9,9 @@ async def main():
     runtime_session_id = str(uuid.uuid4())
     print(f"runtime_session_id: {runtime_session_id}")
 
-    prompt = "보일러 에러 코드?"
-    mcp_servers = ["kb-retriever"]
+    prompt = "서울 날씨는?"
+    mcp_servers = ["tavily", "web_fetch"]
+    skill_list = ["skill-creator"]
     model_name = "Claude 4.5 Haiku"
     user_id = uuid.uuid4().hex
     history_mode = "Disable"
@@ -20,7 +21,8 @@ async def main():
         "mcp_servers": mcp_servers,
         "model_name": model_name,
         "user_id": user_id,
-        "history_mode": history_mode
+        "history_mode": history_mode,
+        "skill_list": skill_list,
     }
 
     runtime_url = "http://127.0.0.1:8080/invocations"

@@ -29,7 +29,7 @@ def load_config():
         session = boto3.Session()
         region = session.region_name
         config['region'] = region
-        config['projectName'] = "agent-runtime"
+        config['projectName'] = "langgraph-runtime"
         
         sts = boto3.client("sts")
         response = sts.get_caller_identity()

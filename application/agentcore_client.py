@@ -444,7 +444,7 @@ def get_tool_info(tool_name, tool_content):
 
     return content, urls, tool_references
 
-def run_agent_in_docker(prompt, agent_type, history_mode, mcp_servers, model_name, notification_queue=None):
+def run_agent_in_docker(prompt, agent_type, history_mode, mcp_servers, model_name, notification_queue=None, skill_list=None):
     tool_info_list.clear()
     tool_result_list.clear()
     tool_name_list.clear()
@@ -462,7 +462,8 @@ def run_agent_in_docker(prompt, agent_type, history_mode, mcp_servers, model_nam
         "mcp_servers": mcp_servers,
         "model_name": model_name,
         "user_id": user_id,
-        "history_mode": history_mode
+        "history_mode": history_mode,
+        "skill_list": skill_list or [],
     })
 
     destination = f"http://localhost:8080/invocations"
@@ -717,7 +718,7 @@ def run_agent_in_docker(prompt, agent_type, history_mode, mcp_servers, model_nam
         logger.error(error_msg)
         return f"Error: {error_msg}", []
 
-def run_agent(prompt, agent_type, history_mode, mcp_servers, model_name, notification_queue=None):
+def run_agent(prompt, agent_type, history_mode, mcp_servers, model_name, notification_queue=None, skill_list=None):
     tool_info_list.clear()
     tool_result_list.clear()
     tool_name_list.clear()
@@ -735,7 +736,8 @@ def run_agent(prompt, agent_type, history_mode, mcp_servers, model_name, notific
         "mcp_servers": mcp_servers,
         "model_name": model_name,
         "user_id": user_id,
-        "history_mode": history_mode
+        "history_mode": history_mode,
+        "skill_list": skill_list or [],
     })
 
     runtime_name = projectName.replace('-', '_')+'_'+agent_type

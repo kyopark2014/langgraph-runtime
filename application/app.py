@@ -1,9 +1,11 @@
 import streamlit as st 
 import chat
+import json
 import logging
-import sys
 import os
+import sys
 import agentcore_client
+import utils
 from notification_queue import NotificationQueue
 
 logging.basicConfig(
@@ -15,7 +17,24 @@ logging.basicConfig(
 )
 logger = logging.getLogger("streamlit")
 
+config = utils.load_config()
+
+_application_dir = os.path.dirname(os.path.abspath(__file__))
+
+
+def load_capability_list(filename: str) -> list:
+    path = os.path.join(_application_dir, filename)
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            return [line.strip() for line in f if line.strip() and not line.strip().startswith("#")]
+    except FileNotFoundError:
+        logger.warning(f"Capability list not found: {path}")
+        return []
+
+
 os.environ["DEV"] = "true"  # Skip user confirmation of get_user_input
+
+agent_type = "langgraph"
 
 # title
 st.set_page_config(page_title='AgentCore', page_icon=None, layout="centered", initial_sidebar_state="auto", menu_items=None)
@@ -34,7 +53,7 @@ with st.sidebar:
     
     st.markdown(
         "Amazon의 AgentCore을 이용해 Agent를 구현합니다." 
-        "상세한 코드는 [Github](https://github.com/kyopark2014/agentCore-langgraph)을 참조하세요."
+        "상세한 코드는 [Github](https://github.com/kyopark2014/langgraph-runtime)을 참조하세요."
     )
 
     st.subheader("🐱 대화 형태")
@@ -47,15 +66,42 @@ with st.sidebar:
     
     # mcp selection    
     if mode=='Agent' or mode=='Agent (Chat)':
+        st.subheader("⚙️ Skill Config")
+
+        skill_selections = {}
+        skill_options = load_capability_list("skills.list")
+        default_skill_selections = config.get("default_skills") or []
+        if not default_skill_selections and "skill-creator" in skill_options:
+            default_skill_selections = ["skill-creator"]
+        default_skill_selections = [name for name in default_skill_selections if name in skill_options]
+        logger.info(f"default_skill_selections: {default_skill_selections}")
+        with st.expander("Skill 옵션 선택", expanded=True):
+            logger.info(f"skill_options: {skill_options}")
+            for name in skill_options:
+                default_value = name in default_skill_selections
+                skill_selections[name] = st.checkbox(
+                    name,
+                    key=f"skill_{name}",
+                    value=default_value,
+                    disabled=False,
+                )
+
+        selected_skills = [name for name, is_selected in skill_selections.items() if is_selected]
+        logger.info(f"selected_skills: {selected_skills}")
+
+        if selected_skills != config.get("default_skills"):
+            config["default_skills"] = selected_skills
+            with open(utils.config_path, "w", encoding="utf-8") as f:
+                json.dump(config, f, ensure_ascii=False, indent=4)
+
         # MCP Config JSON input
         st.subheader("⚙️ MCP Config")
 
         # Change radio to checkbox
-        mcp_options = [
-            "kb-retriever", "use-aws", "aws document", "사용자 설정"
-        ]
+        mcp_options = load_capability_list("mcp.list")
         mcp_selections = {}
-        default_selections = ["kb-retriever", "use-aws"]
+        default_selections = config.get("default_mcp_servers") or ["tavily", "web_fetch"]
+        default_selections = [name for name in default_selections if name in mcp_options]
 
         with st.expander("MCP 옵션 선택", expanded=True):            
             # Create two columns
@@ -84,27 +130,19 @@ with st.sidebar:
         mcp_servers = [server for server, is_selected in mcp_selections.items() if is_selected]
     else:
         mcp_servers = []
+        selected_skills = []
 
     # model selection box
     modelName = st.selectbox(
         '🖊️ 사용 모델을 선택하세요',
         (
-            "Claude 4.5 Haiku",
+            "Claude 4.6 Sonnet",
+            "Claude 4.8 Opus",
+            "Claude 4.7 Opus",
+            "Claude 4.6 Opus",
+            "Claude 4.5 Opus",
             "Claude 4.5 Sonnet",
-            "Claude 4.5 Opus",  
-            "Claude 4 Opus", 
-            "Claude 4 Sonnet", 
-            "Claude 3.7 Sonnet", 
-            "Claude 3.5 Sonnet", 
-            "Claude 3.0 Sonnet", 
-            "Claude 3.5 Haiku", 
-            "OpenAI OSS 120B",
-            "OpenAI OSS 20B",
-            "Nova 2 Lite",
-            "Nova Premier", 
-            "Nova Pro", 
-            "Nova Lite", 
-            "Nova Micro",       
+            "Claude 4.5 Haiku"
         ), index=0
     )
     chat.update(modelName)
@@ -113,10 +151,6 @@ with st.sidebar:
     platform = st.radio(
         label="사용 플렛폼을 선택하세요. ",options=["AgentCore","Docker"], index=0
     )   
-
-    agent_type = st.radio(
-        label="Agent 타입을 선택하세요. ",options=["langgraph", "strands", "claude"], index=0
-    )
     
     st.success(f"Connected to {modelName}", icon="💚")
     clear_button = st.button("대화 초기화", key="clear")
@@ -192,10 +226,19 @@ if prompt := st.chat_input("메시지를 입력하세요."):
                 logger.info(f"mcp_servers: {mcp_servers}")
 
                 notification_queue = NotificationQueue(container=status)
+                skill_list = selected_skills if selected_skills else []
+                logger.info(f"skill_list: {skill_list}")
+
                 if platform == 'AgentCore':
-                    response, image_url = agentcore_client.run_agent(prompt, agent_type, history_mode, mcp_servers, modelName, notification_queue)
-                else:                    
-                    response, image_url = agentcore_client.run_agent_in_docker(prompt, agent_type, history_mode, mcp_servers, modelName, notification_queue)
+                    response, image_url = agentcore_client.run_agent(
+                        prompt, agent_type, history_mode, mcp_servers, modelName, notification_queue,
+                        skill_list=skill_list,
+                    )
+                else:
+                    response, image_url = agentcore_client.run_agent_in_docker(
+                        prompt, agent_type, history_mode, mcp_servers, modelName, notification_queue,
+                        skill_list=skill_list,
+                    )
 
             st.session_state.messages.append({
                 "role": "assistant", 

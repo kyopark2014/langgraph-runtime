@@ -2,8 +2,6 @@ import json
 import logging
 import sys
 import chat
-import mcp_config
-import langgraph_agent
 import utils
 import httpx
 import boto3
@@ -13,7 +11,6 @@ from botocore.auth import SigV4Auth as BotocoreSigV4Auth
 from botocore.awsrequest import AWSRequest
 
 from langchain_core.messages import HumanMessage, ToolMessage, AIMessageChunk
-from langchain_mcp_adapters.client import MultiServerMCPClient
 from bedrock_agentcore.runtime import BedrockAgentCoreApp
 
 logging.basicConfig(
@@ -121,54 +118,34 @@ async def agent_langgraph(payload):
     mcp_servers = payload.get("mcp_servers", [])
     logger.info(f"mcp_servers: {mcp_servers}")
 
+    skill_list = payload.get("skill_list", [])
+    logger.info(f"skill_list: {skill_list}")
+
     model_name = payload.get("model_name")
     logger.info(f"model_name: {model_name}")
 
     user_id = payload.get("user_id")
     logger.info(f"user_id: {user_id}")
 
+    if user_id:
+        chat.user_id = user_id
+
     chat.update(
         modelName=model_name if model_name else chat.model_name,
         debugMode=payload.get("debug_mode", chat.debug_mode),
-        multiRegion=payload.get("multi_region", chat.multi_region),
-        reasoningMode=payload.get("reasoning_mode", chat.reasoning_mode),
-        agentType=payload.get("agent_type", chat.agent_type),
     )
 
-    history_mode = payload.get("history_mode")
+    history_mode = payload.get("history_mode", "Disable")
     logger.info(f"history_mode: {history_mode}")
 
-    mcp_json = mcp_config.load_selected_config(mcp_servers)
-    # logger.info(f"mcp_json: {mcp_json}")        
-    
-    server_params = langgraph_agent.load_multiple_mcp_server_parameters(mcp_json)
-    # logger.info(f"server_params: {server_params}")    
-    
-    # Handle case when no MCP servers are available with empty tools list
-    if not server_params:
-        logger.info("No valid MCP servers configured, using empty tools list")
-        tools = []
-    else:        
-        logger.info(f"auth_type: {auth_type}")
-        if auth_type == "iam":
-            # Apply monkey patch only if SigV4 is needed
-            # Keep it global so it applies to all httpx.AsyncClient instances created during tool execution        
-            httpx.AsyncClient.__init__ = patched_init
-            logger.info(f"Applied SigV4 monkey patch")
-        
-        client = MultiServerMCPClient(server_params)
-        tools = await client.get_tools()
-        
-    tool_list = [tool.name for tool in tools]
-    logger.info(f"tool_list: {tool_list}")
+    if auth_type == "iam":
+        httpx.AsyncClient.__init__ = patched_init
+        logger.info("Applied SigV4 monkey patch")
 
-    app = langgraph_agent.buildChatAgentWithHistory(tools)
-    config = {
-        "recursion_limit": 100,
-        "configurable": {"thread_id": user_id},
-        "tools": tools,
-        "system_prompt": None
-    }
+    app, config = await chat.create_agent(mcp_servers, skill_list, history_mode)
+    if app is None:
+        yield {"result": {"messages": [{"role": "assistant", "content": "사용 가능한 도구가 없습니다."}], "image_url": []}}
+        return
     
     inputs = {
         "messages": [HumanMessage(content=query)]

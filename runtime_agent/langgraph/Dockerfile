@@ -3,10 +3,10 @@ FROM --platform=linux/arm64 python:3.13-slim
 WORKDIR /app
 
 RUN pip install boto3 botocore --upgrade
-RUN pip install langchain_aws langchain langchain_community langchain_experimental langgraph 
+RUN pip install langchain_aws langchain langchain_community langgraph
 RUN pip install mcp langchain-mcp-adapters
 RUN pip install bedrock-agentcore uv
-RUN pip install PyPDF2 Pillow pytz tavily-python langchain-text-splitters
+RUN pip install Pillow pytz tavily-python langchain-text-splitters
 
 # OpenTelemetry
 RUN pip install aws-opentelemetry-distro>=0.10.0
