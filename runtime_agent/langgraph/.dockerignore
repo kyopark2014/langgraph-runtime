@@ -1,6 +1,5 @@
 # Docker / deployment tooling (not used at runtime)
 Dockerfile
-Dockerfile.local
 .dockerignore
 build-docker.sh
 run-docker.sh

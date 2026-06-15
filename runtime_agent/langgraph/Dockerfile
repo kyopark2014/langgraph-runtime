@@ -2,12 +2,22 @@ FROM --platform=linux/arm64 python:3.13-slim
 
 WORKDIR /app
 
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    curl \
+    nodejs \
+    npm \
+    && rm -rf /var/lib/apt/lists/*
+
 RUN pip install boto3 botocore --upgrade
 RUN pip install langchain_aws langchain langchain_community langgraph
 RUN pip install mcp langchain-mcp-adapters
 RUN pip install bedrock-agentcore uv
 RUN pip install Pillow pytz tavily-python langchain-text-splitters
 RUN pip install requests beautifulsoup4
+RUN pip install python-docx openpyxl reportlab matplotlib pandas pypdf pdfplumber
+
+# Skills that use docx-js / pptxgenjs via execute_code
+RUN npm install -g docx pptxgenjs
 
 # OpenTelemetry
 RUN pip install aws-opentelemetry-distro>=0.10.0
