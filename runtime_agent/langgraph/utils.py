@@ -86,10 +86,37 @@ def get_contents_type(file_name):
     return content_type
 
 # api key to use Tavily Search
-tavily_key = config.get("tavily_api_key", "")
+def _load_tavily_api_key(app_config: dict) -> str:
+    """Load Tavily API key from config.json or Secrets Manager."""
+    key = app_config.get("tavily_api_key", "")
+    if key:
+        return key
+
+    region = app_config.get("region", "us-west-2")
+    secret_names = []
+    if app_config.get("knowledge_base_name"):
+        secret_names.append(f"tavilyapikey-{app_config['knowledge_base_name']}")
+    if app_config.get("projectName"):
+        secret_names.append(f"tavilyapikey-{app_config['projectName']}")
+
+    secrets_client = boto3.client("secretsmanager", region_name=region)
+    for secret_name in dict.fromkeys(secret_names):
+        try:
+            response = secrets_client.get_secret_value(SecretId=secret_name)
+            secret_data = json.loads(response["SecretString"])
+            key = secret_data.get("tavily_api_key", "")
+            if key:
+                logger.info(f"tavily_key loaded from Secrets Manager: {secret_name}")
+                return key
+        except Exception as e:
+            logger.debug(f"Could not load Tavily secret {secret_name}: {e}")
+    return ""
+
+
+tavily_key = _load_tavily_api_key(config)
 if tavily_key:
     os.environ["TAVILY_API_KEY"] = tavily_key
     tavily_api_wrapper = TavilySearchAPIWrapper(tavily_api_key=tavily_key)
-    logger.info("tavily_key loaded from config.json")
+    logger.info("tavily_key is configured")
 else:
     logger.info("tavily_key is not set.")

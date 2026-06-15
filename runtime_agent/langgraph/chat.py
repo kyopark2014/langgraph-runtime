@@ -1199,24 +1199,21 @@ async def create_agent(mcp_servers: list, skill_list: list, history_mode: str="D
     # logger.info(f"mcp_json: {mcp_json}")
 
     server_params = langgraph_agent.load_multiple_mcp_server_parameters(mcp_json)
-    # logger.info(f"server_params: {server_params}")    
 
-    try:
-        client = MultiServerMCPClient(server_params)
-        logger.info(f"MCP client is initialized successfully")
-        
-        mcp_tools = await client.get_tools()        # add MCP tools
-        # logger.info(f"mcp_tools: {mcp_tools}")        
-        for tool in mcp_tools:
-            logger.info(f"mcp_tool: {tool.name}")
-            if tool.name not in tools:
-                tools.append(tool)
-            else:
-                logger.info(f"mcp_tool of {tool.name} already in tools")
-
-    except Exception as e:
-        logger.error(f"Error creating MCP client or getting tools: {e}")
-        logger.info(f"Falling back to builtin tools only (count: {len(tools)})")
+    for server_name, params in server_params.items():
+        try:
+            client = MultiServerMCPClient({server_name: params})
+            logger.info(f"MCP client initialized for server: {server_name}")
+            mcp_tools = await client.get_tools()
+            for tool in mcp_tools:
+                logger.info(f"mcp_tool: {tool.name} (from {server_name})")
+                if tool.name not in [t.name for t in tools]:
+                    tools.append(tool)
+                else:
+                    logger.info(f"mcp_tool of {tool.name} already in tools")
+        except Exception as e:
+            logger.error(f"Failed to load MCP server '{server_name}': {e}")
+            logger.info(f"Continuing with remaining MCP servers (tools loaded: {len(tools)})")
         
     tools.extend(skill.get_skill_tools())
 
