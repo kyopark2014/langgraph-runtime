@@ -838,11 +838,8 @@ cd es-us-project && python3 installer.py
 API 구현에 필요한 credential은 secret으로 관리합니다. 따라서 설치시 필요한 credential 입력이 필요한데 아래와 같은 방식을 활용하여 미리 credential을 준비합니다. 
 
 - 일반 인터넷 검색: [Tavily Search](https://app.tavily.com/sign-in)에 접속하여 가입 후 API Key를 발급합니다. 이것은 tvly-로 시작합니다.  
-- 날씨 검색: [openweathermap](https://home.openweathermap.org/api_keys)에 접속하여 API Key를 발급합니다. 이때 price plan은 "Free"를 선택합니다.
 
-설치가 완료되면 아래와 같은 CloudFront로 접속하여 동작을 확인합니다. 
-
-<img width="500" alt="cloudfront_address" src="https://github.com/user-attachments/assets/7ab1a699-eefb-4b55-b214-23cbeeeb7249" />
+설치가 완료되면 CloudFront로 접속하여 동작을 확인합니다. 
 
 접속한 후 아래와 같이 Agent를 선택한 후에 적절한 MCP tool을 선택하여 원하는 작업을 수행합니다.
 
@@ -855,21 +852,7 @@ python uninstaller.py
 ```
 
 
-### 배포된 Application 업데이트 하기
 
-AWS console의 EC2로 접속하여 [Launch an instance](https://us-west-2.console.aws.amazon.com/ec2/home?region=us-west-2#Instances:)를 선택하여 아래와 같이 아래와 같이 "app-for-es-us"라는 이름을 가지는 instance id를 선택합니다.
-
-<img width="750" alt="image" src="https://github.com/user-attachments/assets/7d6d756a-03ba-4422-9413-9e4b6d3bc1da" />
-
-[connect]를 선택한 후에 Session Manager를 선택하여 접속합니다. 
-
-<img width="700" alt="image" src="https://github.com/user-attachments/assets/d1119cd6-08fb-4d3e-b1c2-77f2d7c1216a" />
-
-이후 아래와 같이 업데이트한 후에 다시 브라우저에서 확인합니다.
-
-```text
-cd ~/es-us-project/ && sudo ./update.sh
-```
 
 ### 실행 로그 확인
 
