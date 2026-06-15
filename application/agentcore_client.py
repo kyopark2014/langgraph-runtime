@@ -40,15 +40,36 @@ def tool_slot_update(notification_queue, slot_key: str, message: str):
     if notification_queue is not None:
         notification_queue.tool_update(slot_key, message)
 
-def load_agentcore_config(agent_name):
-    client = boto3.client('bedrock-agentcore-control', region_name=bedrock_region)
-    response = client.list_agent_runtimes()
-    logger.info(f"response: {response}")
+def load_agentcore_config(agent_name, agent_type=None):
+    """Resolve AgentCore runtime ARN from config or Bedrock control plane."""
+    direct_arn = config.get("agent_runtime_arn")
+    if direct_arn:
+        logger.info(f"Using agent_runtime_arn from config: {direct_arn}")
+        return direct_arn
 
-    agentRuntimes = response['agentRuntimes']
-    for agentRuntime in agentRuntimes:
-        if agentRuntime['agentRuntimeName'] == agent_name:
-            return agentRuntime['agentRuntimeArn']
+    if agent_type:
+        typed_arn = config.get(f"agent_runtime_arn_{agent_type}")
+        if typed_arn:
+            logger.info(f"Using agent_runtime_arn_{agent_type} from config: {typed_arn}")
+            return typed_arn
+
+    candidate_names = [agent_name]
+    if agent_type:
+        candidate_names.append(f"agent_runtime_{agent_type}")
+        candidate_names.append(f"{projectName.replace('-', '_')}_{agent_type}")
+
+    client = boto3.client("bedrock-agentcore-control", region_name=bedrock_region)
+    response = client.list_agent_runtimes()
+    logger.info(f"Looking up agent runtime in {len(response.get('agentRuntimes', []))} runtimes")
+    logger.info(f"Candidate runtime names: {candidate_names}")
+
+    for agent_runtime in response.get("agentRuntimes", []):
+        if agent_runtime.get("agentRuntimeName") in candidate_names:
+            arn = agent_runtime.get("agentRuntimeArn")
+            logger.info(f"Matched runtime '{agent_runtime.get('agentRuntimeName')}': {arn}")
+            return arn
+
+    logger.error(f"No agent runtime matched candidates: {candidate_names}")
     return None
 
 runtime_session_id = str(uuid.uuid4())
@@ -740,8 +761,8 @@ def run_agent(prompt, agent_type, history_mode, mcp_servers, model_name, notific
         "skill_list": skill_list or [],
     })
 
-    runtime_name = projectName.replace('-', '_')+'_'+agent_type
-    agent_runtime_arn = load_agentcore_config(runtime_name)
+    runtime_name = projectName.replace('-', '_') + '_' + agent_type
+    agent_runtime_arn = load_agentcore_config(runtime_name, agent_type=agent_type)
     print(f"agent_runtime_arn: {agent_runtime_arn}")
 
     logger.info(f"agent_runtime_arn: {agent_runtime_arn}")

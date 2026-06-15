@@ -53,6 +53,211 @@ def update_config(key, value):
         print(f"Error updating config: {e}")
         return False
 
+
+def _repo_root() -> str:
+    return os.path.normpath(os.path.join(script_dir, "..", ".."))
+
+
+def get_knowledge_base_name() -> str:
+    """Return project_name from repo root installer.py (Bedrock Knowledge Base name)."""
+    root_installer_path = os.path.join(_repo_root(), "installer.py")
+    try:
+        with open(root_installer_path, "r", encoding="utf-8") as f:
+            for line in f:
+                stripped = line.strip()
+                if stripped.startswith("project_name = "):
+                    value = stripped.split("=", 1)[1].strip()
+                    if "#" in value:
+                        value = value.split("#", 1)[0].strip()
+                    return value.strip('"').strip("'")
+    except OSError as e:
+        print(f"Warning: Could not read root installer.py: {e}")
+
+    app_config_path = os.path.join(_repo_root(), "application", "config.json")
+    try:
+        with open(app_config_path, "r", encoding="utf-8") as f:
+            app_config = json.load(f)
+            project_name = app_config.get("projectName")
+            if project_name:
+                return project_name
+    except (OSError, json.JSONDecodeError):
+        pass
+
+    return "langgraph-runtime"
+
+
+def _load_application_config() -> dict:
+    """Load application/config.json when available."""
+    app_config_path = os.path.join(_repo_root(), "application", "config.json")
+    try:
+        with open(app_config_path, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except (OSError, json.JSONDecodeError):
+        return {}
+
+
+def _parse_s3_vectors_names(vector_bucket_arn: str, index_arn: str) -> dict:
+    """Derive vector bucket/index names from S3 Vectors ARNs."""
+    vector_bucket_name = ""
+    vector_index_name = ""
+    if vector_bucket_arn and "/bucket/" in vector_bucket_arn:
+        vector_bucket_name = vector_bucket_arn.split("/bucket/", 1)[1].split("/")[0]
+    if index_arn and "/index/" in index_arn:
+        vector_index_name = index_arn.rsplit("/index/", 1)[1]
+    return {
+        "vector_bucket_name": vector_bucket_name,
+        "vector_index_name": vector_index_name,
+    }
+
+
+def _find_data_source_id(bedrock_agent_client, knowledge_base_id: str, s3_bucket_name: str = "") -> str:
+    """Return matching data source ID for the Knowledge Base."""
+    try:
+        response = bedrock_agent_client.list_data_sources(
+            knowledgeBaseId=knowledge_base_id,
+            maxResults=100,
+        )
+        data_sources = response.get("dataSourceSummaries", [])
+        if not data_sources:
+            return ""
+
+        if s3_bucket_name:
+            for data_source in data_sources:
+                if data_source.get("name") == s3_bucket_name:
+                    return data_source.get("dataSourceId", "")
+
+        return data_sources[0].get("dataSourceId", "")
+    except ClientError as e:
+        print(f"Warning: Could not list data sources: {e}")
+        return ""
+
+
+def update_knowledge_base_config() -> bool:
+    """Look up Knowledge Base by root installer project_name and update config.json."""
+    print(f"\n{'='*60}")
+    print("Updating Knowledge Base configuration")
+    print(f"{'='*60}")
+
+    try:
+        config = load_config()
+        region = config.get("region")
+        if not region:
+            print("Error: region not found in config.json")
+            return False
+
+        knowledge_base_name = get_knowledge_base_name()
+        print(f"Knowledge Base name (from root installer.py): {knowledge_base_name}")
+
+        app_config = _load_application_config()
+        bedrock_agent_client = boto3.client("bedrock-agent", region_name=region)
+        kb_list = bedrock_agent_client.list_knowledge_bases()
+        knowledge_base_id = None
+        for kb in kb_list.get("knowledgeBaseSummaries", []):
+            if kb.get("name") == knowledge_base_name:
+                knowledge_base_id = kb.get("knowledgeBaseId")
+                break
+
+        if not knowledge_base_id:
+            print(f"Warning: Knowledge Base '{knowledge_base_name}' not found in {region}")
+            updates = {
+                "knowledge_base_name": knowledge_base_name,
+                "collectionArn": "",
+                "opensearch_url": "",
+            }
+            for key in (
+                "knowledge_base_id",
+                "knowledge_base_role",
+                "data_source_id",
+                "s3_bucket",
+                "s3_arn",
+                "sharing_url",
+                "vector_bucket_name",
+                "vector_bucket_arn",
+                "vector_index_name",
+                "vector_index_arn",
+            ):
+                if app_config.get(key):
+                    updates[key] = app_config[key]
+            config.update(updates)
+            with open(config_path, "w", encoding="utf-8") as f:
+                json.dump(config, f, indent=2)
+            if updates.get("knowledge_base_id"):
+                print(f"✓ config.json updated from application/config.json")
+                print(f"  - knowledge_base_id: {updates['knowledge_base_id']}")
+            else:
+                print("✓ config.json updated with knowledge_base_name only")
+            return True
+
+        kb_details = bedrock_agent_client.get_knowledge_base(knowledgeBaseId=knowledge_base_id)
+        knowledge_base = kb_details.get("knowledgeBase", {})
+
+        updates = {
+            "knowledge_base_name": knowledge_base_name,
+            "knowledge_base_id": knowledge_base_id,
+            "knowledge_base_role": knowledge_base.get("roleArn", ""),
+            "collectionArn": "",
+            "opensearch_url": "",
+        }
+
+        storage = knowledge_base.get("storageConfiguration", {})
+        storage_type = storage.get("type", "")
+        if storage_type == "S3_VECTORS":
+            s3_vectors_cfg = storage.get("s3VectorsConfiguration", {})
+            vector_bucket_arn = s3_vectors_cfg.get("vectorBucketArn", "")
+            vector_index_arn = s3_vectors_cfg.get("indexArn", "")
+            parsed_names = _parse_s3_vectors_names(vector_bucket_arn, vector_index_arn)
+            updates.update(
+                {
+                    "vector_bucket_arn": vector_bucket_arn,
+                    "vector_index_arn": vector_index_arn,
+                    "vector_bucket_name": parsed_names["vector_bucket_name"],
+                    "vector_index_name": parsed_names["vector_index_name"],
+                }
+            )
+        elif storage_type == "OPENSEARCH_SERVERLESS":
+            opensearch_cfg = storage.get("opensearchServerlessConfiguration", {})
+            updates["collectionArn"] = opensearch_cfg.get("collectionArn", "")
+            updates["vector_bucket_name"] = ""
+            updates["vector_bucket_arn"] = ""
+            updates["vector_index_name"] = ""
+            updates["vector_index_arn"] = ""
+
+        for key in (
+            "s3_bucket",
+            "s3_arn",
+            "sharing_url",
+            "data_source_id",
+            "vector_bucket_name",
+            "vector_bucket_arn",
+            "vector_index_name",
+            "vector_index_arn",
+        ):
+            if app_config.get(key) and not updates.get(key):
+                updates[key] = app_config[key]
+
+        s3_bucket_name = updates.get("s3_bucket") or app_config.get("s3_bucket", "")
+        if not updates.get("data_source_id"):
+            updates["data_source_id"] = _find_data_source_id(
+                bedrock_agent_client,
+                knowledge_base_id,
+                s3_bucket_name,
+            )
+
+        config.update(updates)
+        with open(config_path, "w", encoding="utf-8") as f:
+            json.dump(config, f, indent=2)
+
+        print(f"✓ config.json updated for Knowledge Base: {knowledge_base_name}")
+        print(f"  - knowledge_base_id: {updates.get('knowledge_base_id', '')}")
+        if updates.get("data_source_id"):
+            print(f"  - data_source_id: {updates['data_source_id']}")
+        if updates.get("vector_index_arn"):
+            print(f"  - vector_index_arn: {updates['vector_index_arn']}")
+        return True
+    except Exception as e:
+        print(f"Error updating Knowledge Base configuration: {e}")
+        return False
+
 # ============================================================================
 # IAM Policy and Role Creation Functions
 # ============================================================================
@@ -775,6 +980,7 @@ def main():
     
     # Execute each step
     steps = [
+        ("Updating Knowledge Base configuration", update_knowledge_base_config),
         ("Creating IAM policies and roles", create_iam_policies),
         ("Building Docker image and pushing to ECR", push_to_ecr),
         ("Creating/updating AgentCore runtime", create_agent_runtime),
@@ -796,9 +1002,15 @@ def main():
     
     role_arn = config.get('agent_runtime_role')
     arn = config.get('agent_runtime_arn')
+    knowledge_base_name = config.get('knowledge_base_name')
+    knowledge_base_id = config.get('knowledge_base_id')
     
+    if knowledge_base_name:
+        print(f"\nKnowledge Base Name: {knowledge_base_name}")
+    if knowledge_base_id:
+        print(f"Knowledge Base ID: {knowledge_base_id}")
     if role_arn:
-        print(f"\nCreated AgentCore Runtime Role ARN: {role_arn}")
+        print(f"Created AgentCore Runtime Role ARN: {role_arn}")
     if arn:
         print(f"Created AgentCore Runtime ARN: {arn}")
     

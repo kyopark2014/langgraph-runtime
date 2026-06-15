@@ -151,7 +151,8 @@ async def agent_langgraph(payload):
         "messages": [HumanMessage(content=query)]
     }
 
-    final_output = None
+    result_text = ""
+    tool_used = False
     tool_input_list = {}
     yielded_tool_ids = set()
 
@@ -162,6 +163,11 @@ async def agent_langgraph(payload):
         if isinstance(chunk, AIMessageChunk):
             content = chunk.content
             if isinstance(content, str) and content:
+                if tool_used:
+                    result_text = content
+                    tool_used = False
+                else:
+                    result_text += content
                 yield {"data": content}
             elif isinstance(content, list):
                 for item in content:
@@ -170,6 +176,11 @@ async def agent_langgraph(payload):
                     if item.get("type") == "text":
                         text_part = item.get("text", "")
                         if text_part:
+                            if tool_used:
+                                result_text = text_part
+                                tool_used = False
+                            else:
+                                result_text += text_part
                             yield {"data": text_part}
                     elif item.get("type") == "tool_use":
                         tool_use_id = item.get("id", "")
@@ -216,16 +227,17 @@ async def agent_langgraph(payload):
 
         elif isinstance(chunk, ToolMessage):
             logger.info(f"ToolMessage: {chunk.name}, {chunk.content}")
+            tool_used = True
             yield {"toolResult": chunk.content, "toolUseId": chunk.tool_call_id}
 
-    try:
-        snap = await app.aget_state(config)
-        if snap and getattr(snap, "values", None) is not None:
-            msgs = snap.values.get("messages")
-            final_output = {"messages": msgs, "image_url": []} if msgs is not None else None
-    except Exception as e:
-        logger.warning(f"aget_state: {e}")
+    if not result_text.strip():
+        result_text = "답변을 찾지 못하였습니다."
 
+    final_output = {
+        "messages": [{"role": "assistant", "content": result_text}],
+        "image_url": [],
+    }
+    logger.info(f"final_output: {result_text[:200]!r}...")
     yield {"result": final_output}
 
 if __name__ == "__main__":

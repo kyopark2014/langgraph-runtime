@@ -103,26 +103,12 @@ with st.sidebar:
         default_selections = config.get("default_mcp_servers") or ["tavily", "web_fetch"]
         default_selections = [name for name in default_selections if name in mcp_options]
 
-        with st.expander("MCP 옵션 선택", expanded=True):            
-            # Create two columns
-            col1, col2 = st.columns(2)
-            
-            # Split options into two groups
-            mid_point = len(mcp_options) // 2
-            first_half = mcp_options[:mid_point]
-            second_half = mcp_options[mid_point:]
-            
-            # Display first group in the first column
-            with col1:
-                for option in first_half:
-                    default_value = option in default_selections
-                    mcp_selections[option] = st.checkbox(option, key=f"mcp_{option}", value=default_value)
-            
-            # Display second group in the second column
-            with col2:
-                for option in second_half:
-                    default_value = option in default_selections
-                    mcp_selections[option] = st.checkbox(option, key=f"mcp_{option}", value=default_value)
+        with st.expander("MCP 옵션 선택", expanded=True):
+            for option in mcp_options:
+                default_value = option in default_selections
+                mcp_selections[option] = st.checkbox(
+                    option, key=f"mcp_{option}", value=default_value
+                )
         
         # if not any(mcp_selections.values()):
         #     mcp_selections["basic"] = True
