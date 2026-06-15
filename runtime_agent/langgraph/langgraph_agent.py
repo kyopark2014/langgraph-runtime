@@ -103,6 +103,19 @@ def _working_dir_files_mtime_snapshot() -> dict:
                 pass
     return snap
 
+
+def _ensure_node_path():
+    """Expose /app/node_modules to Node require() for bash and execute_code."""
+    node_modules = os.path.join(WORKING_DIR, "node_modules")
+    if not os.path.isdir(node_modules):
+        return
+    existing = os.environ.get("NODE_PATH", "")
+    if node_modules not in existing.split(os.pathsep):
+        os.environ["NODE_PATH"] = (
+            f"{node_modules}{os.pathsep}{existing}" if existing else node_modules
+        )
+
+
 def _ensure_cli_scripts_on_path() -> None:
     """Prepend pip user script dir so CLIs (e.g. browser-use) resolve in subprocess."""
     import site
@@ -308,15 +321,8 @@ def execute_code(code: str) -> str:
 
         _ensure_cli_scripts_on_path()
         _ensure_matplotlib_runtime()
+        _ensure_node_path()
         
-        node_modules = os.path.join(WORKING_DIR, "node_modules")
-        if os.path.isdir(node_modules):
-            existing = os.environ.get("NODE_PATH", "")
-            if node_modules not in existing.split(os.pathsep):
-                os.environ["NODE_PATH"] = (
-                    f"{node_modules}{os.pathsep}{existing}" if existing else node_modules
-                )
-
         exec(code, _exec_globals)
 
         sys.stdout, sys.stderr = old_stdout, old_stderr
@@ -459,6 +465,7 @@ def bash(command: str) -> str:
     """Execute a bash command and return the result"""
     logger.info(f"###### bash: {command} ######")
     _ensure_cli_scripts_on_path()
+    _ensure_node_path()
     result = subprocess.run(
         command, shell=True, capture_output=True, text=True,
         cwd=WORKING_DIR, timeout=300,

@@ -16,8 +16,9 @@ RUN pip install Pillow pytz tavily-python langchain-text-splitters
 RUN pip install requests beautifulsoup4
 RUN pip install python-docx openpyxl reportlab matplotlib pandas pypdf pdfplumber
 
-# Skills that use docx-js / pptxgenjs via execute_code
-RUN npm install -g docx pptxgenjs
+# Skills that use docx-js / pptxgenjs via bash/node (local install for require())
+RUN npm install docx pptxgenjs
+ENV NODE_PATH=/app/node_modules
 
 # OpenTelemetry
 RUN pip install aws-opentelemetry-distro>=0.10.0
