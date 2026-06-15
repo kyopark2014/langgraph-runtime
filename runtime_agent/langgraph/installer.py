@@ -838,11 +838,24 @@ def get_latest_image_tag(config):
         print(f"Error getting latest image tag: {e}")
         return None
 
-def update_agentcore_json(agent_runtime_arn):
-    """Update config.json with agent runtime ARN."""
+def update_agentcore_json(agent_runtime_arn, image_tag=None):
+    """Update config.json with agent runtime ARN and sync application config."""
     try:
         update_config('agent_runtime_arn', agent_runtime_arn)
+        if image_tag:
+            update_config('latest_image_tag', image_tag)
         print(f"✓ config.json updated with agent_runtime_arn: {agent_runtime_arn}")
+
+        app_config_path = os.path.join(_repo_root(), "application", "config.json")
+        if os.path.isfile(app_config_path):
+            with open(app_config_path, "r", encoding="utf-8") as f:
+                app_config = json.load(f)
+            app_config["agent_runtime_arn"] = agent_runtime_arn
+            if image_tag:
+                app_config["agent_latest_image_tag"] = image_tag
+            with open(app_config_path, "w", encoding="utf-8") as f:
+                json.dump(app_config, f, ensure_ascii=False, indent=2)
+            print(f"✓ application/config.json synced (agent_latest_image_tag={image_tag})")
         return True
     except Exception as e:
         print(f"Error updating config.json: {e}")
@@ -982,7 +995,7 @@ def create_agent_runtime():
             return False
         
         # Update config.json
-        update_agentcore_json(agent_runtime_arn)
+        update_agentcore_json(agent_runtime_arn, image_tag)
         
         print("\n✓ Agent runtime creation/update completed")
         return True

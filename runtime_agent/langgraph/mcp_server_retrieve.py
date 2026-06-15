@@ -1,12 +1,18 @@
 import logging
 import sys
 import os
+import importlib.util
 
 _script_dir = os.path.dirname(os.path.abspath(__file__))
 if _script_dir not in sys.path:
     sys.path.insert(0, _script_dir)
 
-import mcp_retrieve
+_retrieve_module_path = os.path.join(_script_dir, "mcp_retrieve.py")
+_spec = importlib.util.spec_from_file_location("mcp_retrieve", _retrieve_module_path)
+if _spec is None or _spec.loader is None:
+    raise ImportError(f"Cannot load mcp_retrieve from {_retrieve_module_path}")
+_mcp_retrieve = importlib.util.module_from_spec(_spec)
+_spec.loader.exec_module(_mcp_retrieve)
 
 from mcp.server.fastmcp import FastMCP 
 
@@ -44,7 +50,7 @@ def retrieve(keyword: str) -> str:
     """
     logger.info(f"search --> keyword: {keyword}")
 
-    return mcp_retrieve.retrieve(keyword)
+    return _mcp_retrieve.retrieve(keyword)
 
 if __name__ =="__main__":
     mcp.run(transport="stdio")

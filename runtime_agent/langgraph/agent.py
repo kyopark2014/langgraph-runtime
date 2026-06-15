@@ -10,7 +10,7 @@ from urllib.parse import urlparse
 from botocore.auth import SigV4Auth as BotocoreSigV4Auth
 from botocore.awsrequest import AWSRequest
 
-from langchain_core.messages import HumanMessage, ToolMessage, AIMessageChunk
+from langchain_core.messages import HumanMessage, ToolMessage, AIMessageChunk, AIMessage
 from bedrock_agentcore.runtime import BedrockAgentCoreApp
 
 logging.basicConfig(
@@ -207,6 +207,40 @@ async def agent_langgraph(payload):
                                 except json.JSONDecodeError:
                                     pass
             # 완성된 tool_calls가 청크에 붙은 경우 (비스트리밍/일부 경로)
+            if getattr(chunk, "tool_calls", None):
+                for tc in chunk.tool_calls:
+                    if isinstance(tc, dict):
+                        tid, name, args = (
+                            tc.get("id", ""),
+                            tc.get("name", ""),
+                            tc.get("args", {}),
+                        )
+                    else:
+                        tid = getattr(tc, "id", "") or ""
+                        name = getattr(tc, "name", "") or ""
+                        args = getattr(tc, "args", {}) or {}
+                    if tid and tid not in yielded_tool_ids:
+                        yielded_tool_ids.add(tid)
+                        yield {"tool": name, "input": args, "toolUseId": tid}
+
+        elif isinstance(chunk, AIMessage):
+            content = chunk.content
+            text_parts = []
+            if isinstance(content, str) and content:
+                text_parts.append(content)
+            elif isinstance(content, list):
+                for item in content:
+                    if isinstance(item, dict) and item.get("type") == "text":
+                        text_part = item.get("text", "")
+                        if text_part:
+                            text_parts.append(text_part)
+            for text_part in text_parts:
+                if tool_used:
+                    result_text = text_part
+                    tool_used = False
+                else:
+                    result_text += text_part
+                yield {"data": text_part}
             if getattr(chunk, "tool_calls", None):
                 for tc in chunk.tool_calls:
                     if isinstance(tc, dict):

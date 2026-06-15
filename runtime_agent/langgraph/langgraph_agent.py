@@ -488,6 +488,19 @@ def get_builtin_tools() -> list:
     else:
         return [execute_code, write_file, read_file, bash, get_current_time]
 
+def _assistant_text_content(msg: AIMessage) -> str:
+    content = msg.content
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        parts = []
+        for block in content:
+            if isinstance(block, dict) and block.get("type") == "text":
+                parts.append(str(block.get("text", "")))
+        return "".join(parts)
+    return str(content) if content else ""
+
+
 def sanitize_messages_for_bedrock(messages: list) -> list:
     """Bedrock requires every assistant tool_use to be followed by tool_result for each id.
 
@@ -524,7 +537,9 @@ def sanitize_messages_for_bedrock(messages: list) -> list:
                 needed,
                 got,
             )
-            out.append(AIMessage(content=msg.content or ""))
+            text = _assistant_text_content(msg)
+            if text.strip():
+                out.append(AIMessage(content=text))
             i = j
             continue
         out.append(msg)

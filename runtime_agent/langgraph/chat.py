@@ -94,19 +94,48 @@ memorystores = dict()
 checkpointer = MemorySaver()
 memorystore = InMemoryStore()
 
+
+def _memory_scope(mcp_servers: list, skill_list: list) -> str:
+    """Isolate LangGraph memory per user and tool/skill configuration."""
+    import hashlib
+
+    payload = json.dumps(
+        {
+            "mcp": sorted(mcp_servers or []),
+            "skills": sorted(skill_list or []),
+        },
+        sort_keys=True,
+    )
+    digest = hashlib.sha256(payload.encode()).hexdigest()[:12]
+    return f"{user_id}:{digest}"
+
+
+def bind_memory(mcp_servers: list, skill_list: list) -> str:
+    """Select or create checkpointer/memory store for the current config."""
+    global checkpointer, memorystore
+
+    scope = _memory_scope(mcp_servers, skill_list)
+    if scope in checkpointers:
+        logger.info(f"memory exist. reuse scope: {scope}")
+        checkpointer = checkpointers[scope]
+        memorystore = memorystores[scope]
+    else:
+        logger.info(f"memory not exist. create new scope: {scope}")
+        checkpointer = MemorySaver()
+        memorystore = InMemoryStore()
+        checkpointers[scope] = checkpointer
+        memorystores[scope] = memorystore
+    return scope
+
+
 def initiate():
     global checkpointer, memorystore, checkpointers, memorystores
 
-    if user_id in checkpointers:
-        logger.info(f"memory exist. reuse it!")
-        checkpointer = checkpointers[user_id]
-        memorystore = memorystores[user_id]
-    else:
-        logger.info(f"memory not exist. create new memory!")
-        checkpointer = MemorySaver()
-        memorystore = InMemoryStore()
-        checkpointers[user_id] = checkpointer
-        memorystores[user_id] = memorystore
+    logger.info("reset all conversation memory scopes")
+    checkpointers.clear()
+    memorystores.clear()
+    checkpointer = MemorySaver()
+    memorystore = InMemoryStore()
 
 selected_chat = 0
 def get_max_output_tokens(model_id: str = "") -> int:
@@ -1090,6 +1119,8 @@ def get_tool_info(tool_name, tool_content):
     return content, urls, tool_references
 
 async def create_agent(mcp_servers: list, skill_list: list, history_mode: str="Disable") -> tuple[str, list]:
+    memory_scope = bind_memory(mcp_servers, skill_list)
+
     # builtin tools
     tools = langgraph_agent.get_builtin_tools()
     logger.info(f"builtin_tools count: {len(tools)}")
@@ -1129,12 +1160,14 @@ async def create_agent(mcp_servers: list, skill_list: list, history_mode: str="D
         logger.warning("No tools available, using general conversation mode")
         return None, None
     
+    thread_id = memory_scope if history_mode == "Enable" else user_id
+
     if history_mode == "Enable":
         app = langgraph_agent.buildChatAgentWithHistory(tools)
         config = {
             "recursion_limit": 100,
             "configurable": {
-                "thread_id": user_id,
+                "thread_id": thread_id,
                 "tools": tools,
                 "system_prompt": system_prompt,
             },
@@ -1144,7 +1177,7 @@ async def create_agent(mcp_servers: list, skill_list: list, history_mode: str="D
         config = {
             "recursion_limit": 100,
             "configurable": {
-                "thread_id": user_id,
+                "thread_id": thread_id,
                 "tools": tools,
                 "system_prompt": system_prompt,
             },
