@@ -41,28 +41,6 @@ logger = logging.getLogger("chat")
 workingDir = os.path.dirname(os.path.abspath(__file__))
 config_path = os.path.join(workingDir, "config.json")
 
-# Simple memory class to replace ConversationBufferWindowMemory
-class SimpleMemory:
-    def __init__(self, k=5):
-        self.k = k
-        self.chat_memory = SimpleChatMemory()
-    
-    def load_memory_variables(self, inputs):
-        return {"chat_history": self.chat_memory.messages[-self.k:] if len(self.chat_memory.messages) > self.k else self.chat_memory.messages}
-
-class SimpleChatMemory:
-    def __init__(self):
-        self.messages = []
-    
-    def add_user_message(self, message):
-        self.messages.append(HumanMessage(content=message))
-    
-    def add_ai_message(self, message):
-        self.messages.append(AIMessage(content=message))
-    
-    def clear(self):
-        self.messages = []
-
 reasoning_mode = 'Disable'
 debug_messages = []  # List to store debug messages
 
@@ -89,9 +67,14 @@ model_type = models[0]["model_type"]
 debug_mode = "Enable"
 user_id = "agent"
 
-def update(modelName, debugMode):    
+def update(userId, modelName, debugMode):    
     global model_name, model_id, model_type, debug_mode, reasoning_mode
     global models, user_id
+
+    if userId != user_id:
+        user_id = userId
+        logger.info(f"user_id: {user_id}")
+        initiate()
 
     if model_name != modelName:
         model_name = modelName
@@ -105,58 +88,25 @@ def update(modelName, debugMode):
         debug_mode = debugMode        
         logger.info(f"debug_mode: {debug_mode}")
 
-map_chain = dict() 
 checkpointers = dict() 
 memorystores = dict() 
 
-memory_chain = None
 checkpointer = MemorySaver()
 memorystore = InMemoryStore()
 
 def initiate():
-    global memory_chain, checkpointer, memorystore, checkpointers, memorystores, user_id
+    global checkpointer, memorystore, checkpointers, memorystores
 
-    user_id = uuid.uuid4()
-
-    # general conversation memory
-    if user_id in map_chain:  
+    if user_id in checkpointers:
         logger.info(f"memory exist. reuse it!")
-        memory_chain = map_chain[user_id]
-
         checkpointer = checkpointers[user_id]
         memorystore = memorystores[user_id]
-    else: 
+    else:
         logger.info(f"memory not exist. create new memory!")
-        memory_chain = SimpleMemory(k=5)
-        map_chain[user_id] = memory_chain
-
         checkpointer = MemorySaver()
         memorystore = InMemoryStore()
-
         checkpointers[user_id] = checkpointer
         memorystores[user_id] = memorystore
-
-def clear_chat_history():
-    global memory_chain
-    # Initialize memory_chain if it doesn't exist
-    if memory_chain is None:
-        initiate()
-    
-    if memory_chain and hasattr(memory_chain, 'chat_memory'):
-        memory_chain.chat_memory.clear()
-    else:
-        memory_chain = SimpleMemory(k=5)
-    map_chain[user_id] = memory_chain
-
-def save_chat_history(text, msg):
-    global memory_chain
-    # Initialize memory_chain if it doesn't exist
-    if memory_chain is None:
-        initiate()
-    
-    if memory_chain and hasattr(memory_chain, 'chat_memory'):
-        memory_chain.chat_memory.add_user_message(text)
-        memory_chain.chat_memory.add_ai_message(msg) 
 
 selected_chat = 0
 def get_max_output_tokens(model_id: str = "") -> int:
@@ -306,56 +256,6 @@ def traslation(chat, text, input_language, output_language):
         raise Exception ("Not able to request to LLM")
 
     return msg[msg.find('<result>')+8:len(msg)-9] # remove <result> tag
-
-####################### LangChain #######################
-# General Conversation
-#########################################################
-def general_conversation(query):
-    global memory_chain
-
-    if memory_chain is None:
-        initiate()  # Initialize memory_chain
-    
-    llm = get_chat()
-
-    system = (
-        "당신의 이름은 서연이고, 질문에 대해 친절하게 답변하는 사려깊은 인공지능 도우미입니다."
-        "상황에 맞는 구체적인 세부 정보를 충분히 제공합니다." 
-        "모르는 질문을 받으면 솔직히 모른다고 말합니다."
-    )
-    
-    human = "Question: {input}"
-    
-    prompt = ChatPromptTemplate.from_messages([
-        ("system", system), 
-        MessagesPlaceholder(variable_name="history"), 
-        ("human", human)
-    ])
-                
-    if memory_chain and hasattr(memory_chain, 'load_memory_variables'):
-        history = memory_chain.load_memory_variables({})["chat_history"]
-        # Ensure history starts with a HumanMessage (Bedrock Converse API requirement)
-        if history and isinstance(history[0], AIMessage):
-            history = history[1:]
-    else:
-        history = []
-
-    chain = prompt | llm | StrOutputParser()
-    try: 
-        stream = chain.stream(
-            {
-                "history": history,
-                "input": query,
-            }
-        )  
-        logger.info(f"stream: {stream}")
-            
-    except Exception:
-        err_msg = traceback.format_exc()
-        logger.info(f"error message: {err_msg}")      
-        raise Exception ("Not able to request to LLM: "+err_msg)
-        
-    return stream
 
 def get_summary(docs):    
     llm = get_chat()

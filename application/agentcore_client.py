@@ -13,6 +13,8 @@ try:
 except ImportError:
     import utils
 
+import chat
+
 logging.basicConfig(
     level=logging.INFO,  # Default to INFO level
     format='%(filename)s:%(lineno)d | %(message)s',
@@ -72,8 +74,18 @@ def load_agentcore_config(agent_name, agent_type=None):
     logger.error(f"No agent runtime matched candidates: {candidate_names}")
     return None
 
-runtime_session_id = str(uuid.uuid4())
-logger.info(f"runtime_session_id: {runtime_session_id}")
+def runtime_session_id_for(user_id: str, history_mode: str) -> str:
+    """AgentCore runtimeSessionId (min length 33).
+
+    Chat mode: deterministic per user_id so history survives client restarts.
+    Agent mode: ephemeral session per request.
+    """
+    if history_mode == "Enable" and user_id:
+        session_id = str(uuid.uuid5(uuid.NAMESPACE_DNS, f"agentcore-session-{user_id}"))
+    else:
+        session_id = str(uuid.uuid4())
+    logger.info(f"runtime_session_id: {session_id} (history_mode={history_mode})")
+    return session_id
 
 tool_info_list = dict()
 tool_result_list = dict()
@@ -475,7 +487,7 @@ def run_agent_in_docker(prompt, agent_type, history_mode, mcp_servers, model_nam
     references = []
     image_url = []
 
-    user_id = agent_type
+    user_id = chat.user_id or agent_type
     logger.info(f"user_id: {user_id}")
 
     payload = json.dumps({
@@ -739,7 +751,7 @@ def run_agent_in_docker(prompt, agent_type, history_mode, mcp_servers, model_nam
         logger.error(error_msg)
         return f"Error: {error_msg}", []
 
-def run_agent(prompt, agent_type, history_mode, mcp_servers, model_name, notification_queue=None, skill_list=None):
+def run_agent(prompt, user_id, history_mode, mcp_servers, model_name, notification_queue=None, skill_list=None):
     tool_info_list.clear()
     tool_result_list.clear()
     tool_name_list.clear()
@@ -749,7 +761,6 @@ def run_agent(prompt, agent_type, history_mode, mcp_servers, model_name, notific
     references = []
     image_url = []
     
-    user_id = agent_type # for testing
     logger.info(f"user_id: {user_id}")
 
     payload = json.dumps({
@@ -761,6 +772,7 @@ def run_agent(prompt, agent_type, history_mode, mcp_servers, model_name, notific
         "skill_list": skill_list or [],
     })
 
+    agent_type = "langgraph"
     runtime_name = projectName.replace('-', '_') + '_' + agent_type
     agent_runtime_arn = load_agentcore_config(runtime_name, agent_type=agent_type)
     print(f"agent_runtime_arn: {agent_runtime_arn}")
@@ -784,9 +796,10 @@ def run_agent(prompt, agent_type, history_mode, mcp_servers, model_name, notific
             region_name=bedrock_region,
             config=boto_config
         )
+        session_id = runtime_session_id_for(user_id, history_mode)
         response = agent_core_client.invoke_agent_runtime(
             agentRuntimeArn=agent_runtime_arn,
-            runtimeSessionId=runtime_session_id,
+            runtimeSessionId=session_id,
             payload=payload,
             qualifier="DEFAULT" # DEFAULT or LATEST
         )

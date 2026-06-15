@@ -127,10 +127,8 @@ async def agent_langgraph(payload):
     user_id = payload.get("user_id")
     logger.info(f"user_id: {user_id}")
 
-    if user_id:
-        chat.user_id = user_id
-
     chat.update(
+        userId=user_id if user_id else chat.user_id,
         modelName=model_name if model_name else chat.model_name,
         debugMode=payload.get("debug_mode", chat.debug_mode),
     )
