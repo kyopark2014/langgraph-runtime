@@ -133,11 +133,6 @@ with st.sidebar:
     )
     chat.update(modelName)
 
-    # platform selection box
-    platform = st.radio(
-        label="사용 플렛폼을 선택하세요. ",options=["AgentCore","Docker"], index=0
-    )   
-    
     st.success(f"Connected to {modelName}", icon="💚")
     clear_button = st.button("대화 초기화", key="clear")
     # logger.info(f"clear_button: {clear_button}")
@@ -215,16 +210,10 @@ if prompt := st.chat_input("메시지를 입력하세요."):
                 skill_list = selected_skills if selected_skills else []
                 logger.info(f"skill_list: {skill_list}")
 
-                if platform == 'AgentCore':
-                    response, image_url = agentcore_client.run_agent(
-                        prompt, agent_type, history_mode, mcp_servers, modelName, notification_queue,
-                        skill_list=skill_list,
-                    )
-                else:
-                    response, image_url = agentcore_client.run_agent_in_docker(
-                        prompt, agent_type, history_mode, mcp_servers, modelName, notification_queue,
-                        skill_list=skill_list,
-                    )
+                response, image_url = agentcore_client.run_agent(
+                    prompt, agent_type, history_mode, mcp_servers, modelName, notification_queue,
+                    skill_list=skill_list,
+                )
 
             st.session_state.messages.append({
                 "role": "assistant", 
