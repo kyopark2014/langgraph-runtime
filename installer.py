@@ -18,6 +18,7 @@ import os
 import sys
 from datetime import datetime
 from typing import Dict, List, Optional, Tuple
+from urllib.parse import urlparse
 from botocore.exceptions import ClientError, NoCredentialsError
 import urllib.request
 import urllib.error
@@ -2944,6 +2945,108 @@ def create_agentcore_memory_role() -> str:
     return role_arn
 
 
+def _cloudfront_distribution_comment() -> str:
+    return f"CloudFront-for-{project_name}"
+
+
+def _load_application_sharing_domain() -> Optional[str]:
+    """Return CloudFront domain from application/config.json if configured."""
+    config_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "application", "config.json")
+    try:
+        with open(config_path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        sharing_url = (data.get("sharing_url") or "").strip()
+        if not sharing_url:
+            return None
+        parsed = urlparse(sharing_url)
+        return parsed.netloc or sharing_url.replace("https://", "").replace("http://", "").strip("/")
+    except (OSError, json.JSONDecodeError):
+        return None
+
+
+def _list_all_cloudfront_distributions() -> List[Dict]:
+    """List all CloudFront distributions (handles pagination)."""
+    items: List[Dict] = []
+    marker: Optional[str] = None
+    while True:
+        kwargs = {"Marker": marker} if marker else {}
+        response = cloudfront_client.list_distributions(**kwargs)
+        dist_list = response.get("DistributionList") or {}
+        items.extend(dist_list.get("Items") or [])
+        if not dist_list.get("IsTruncated"):
+            break
+        marker = dist_list.get("NextMarker")
+    return items
+
+
+def _find_existing_cloudfront_distribution() -> Optional[Dict]:
+    """Find an existing project CloudFront distribution to reuse."""
+    comment = _cloudfront_distribution_comment()
+    preferred_domain = _load_application_sharing_domain()
+
+    try:
+        all_dists = _list_all_cloudfront_distributions()
+    except Exception as e:
+        logger.warning(f"Could not list CloudFront distributions: {e}")
+        return None
+
+    matches = [d for d in all_dists if comment in (d.get("Comment") or "")]
+    if not matches:
+        return None
+
+    if len(matches) > 1:
+        domains = ", ".join(d.get("DomainName", "?") for d in matches)
+        logger.warning(
+            f"Found {len(matches)} CloudFront distributions with comment '{comment}': {domains}"
+        )
+        logger.warning(
+            "  Reusing one distribution only; disable or delete unused duplicates in the AWS console."
+        )
+
+    if preferred_domain:
+        for dist in matches:
+            if dist.get("DomainName") == preferred_domain:
+                logger.info(f"  Reusing CloudFront from application/config.json sharing_url: {preferred_domain}")
+                return dist
+        logger.warning(
+            f"  sharing_url domain '{preferred_domain}' not found among matching distributions; "
+            "falling back to first enabled match."
+        )
+
+    enabled = [d for d in matches if d.get("Enabled")]
+    return enabled[0] if enabled else matches[0]
+
+
+def _reuse_cloudfront_distribution(dist: Dict) -> Dict[str, str]:
+    """Reuse an existing CloudFront distribution and ensure required cache behaviors."""
+    dist_id = dist["Id"]
+    domain = dist["DomainName"]
+    logger.info(f"Reusing existing CloudFront distribution: {domain} (Id: {dist_id})")
+
+    if not dist.get("Enabled"):
+        logger.warning(f"CloudFront distribution exists but is disabled: {domain}")
+        logger.info("  Enabling existing CloudFront distribution...")
+        dist_config_response = cloudfront_client.get_distribution_config(Id=dist_id)
+        dist_config = dist_config_response["DistributionConfig"]
+        etag = dist_config_response["ETag"]
+        dist_config["Enabled"] = True
+        cloudfront_client.update_distribution(
+            Id=dist_id,
+            DistributionConfig=dist_config,
+            IfMatch=etag,
+        )
+        logger.info(f"  ✓ Enabled CloudFront distribution: {domain}")
+
+    try:
+        _ensure_cloudfront_s3_path_behavior(dist_id, "/artifacts/*", f"s3-{project_name}")
+    except Exception as e:
+        logger.warning(
+            f"Could not update CloudFront cache behaviors (reusing distribution anyway): {e}"
+        )
+
+    return {"id": dist_id, "domain": domain}
+
+
 def _cloudfront_s3_cache_behavior(path_pattern: str, s3_origin_id: str) -> Dict[str, object]:
     """CloudFront cache behavior routing a path prefix to the S3 origin."""
     return {
@@ -2991,53 +3094,10 @@ def _ensure_cloudfront_s3_path_behavior(dist_id: str, path_pattern: str, s3_orig
 def create_cloudfront_distribution(alb_info: Dict[str, str], s3_bucket_name: str) -> Dict[str, str]:
     """Create CloudFront distribution with hybrid ALB + S3 origins."""
     logger.info("[7/10] Creating CloudFront distribution (ALB + S3 hybrid)")
-    
-    # Check if CloudFront distribution already exists
-    try:
-        distributions = cloudfront_client.list_distributions()
-        for dist in distributions.get("DistributionList", {}).get("Items", []):
-            if f"CloudFront-for-{project_name}" in dist.get("Comment", ""):
-                if dist.get("Enabled", False):
-                    logger.warning(f"CloudFront distribution already exists: {dist['DomainName']}")
-                    _ensure_cloudfront_s3_path_behavior(
-                        dist["Id"], "/artifacts/*", f"s3-{project_name}"
-                    )
-                    return {
-                        "id": dist["Id"],
-                        "domain": dist["DomainName"]
-                    }
-                else:
-                    # Distribution exists but is disabled, enable it
-                    logger.warning(f"CloudFront distribution exists but is disabled: {dist['DomainName']}")
-                    logger.info("  Enabling existing CloudFront distribution...")
-                    
-                    # Get current distribution config
-                    dist_config_response = cloudfront_client.get_distribution_config(Id=dist["Id"])
-                    dist_config = dist_config_response["DistributionConfig"]
-                    etag = dist_config_response["ETag"]
-                    
-                    # Enable the distribution
-                    dist_config["Enabled"] = True
-                    
-                    # Update the distribution
-                    cloudfront_client.update_distribution(
-                        Id=dist["Id"],
-                        DistributionConfig=dist_config,
-                        IfMatch=etag
-                    )
-                    
-                    logger.info(f"  ✓ Enabled CloudFront distribution: {dist['DomainName']}")
-                    _ensure_cloudfront_s3_path_behavior(
-                        dist["Id"], "/artifacts/*", f"s3-{project_name}"
-                    )
-                    logger.warning("  Note: CloudFront distribution may take 15-20 minutes to deploy")
-                    
-                    return {
-                        "id": dist["Id"],
-                        "domain": dist["DomainName"]
-                    }
-    except Exception as e:
-        logger.debug(f"Error checking existing distributions: {e}")
+
+    existing = _find_existing_cloudfront_distribution()
+    if existing:
+        return _reuse_cloudfront_distribution(existing)
     
     # Check for existing Origin Access Identity or create new one (needed before creating distribution)
     logger.info("  Checking for existing Origin Access Identity for S3...")
@@ -3109,7 +3169,7 @@ def create_cloudfront_distribution(alb_info: Dict[str, str], s3_bucket_name: str
     logger.info("  Creating CloudFront distribution with ALB and S3 origins...")
     distribution_config = {
         "CallerReference": f"{project_name}-{int(time.time())}",
-        "Comment": f"CloudFront-for-{project_name}",
+        "Comment": _cloudfront_distribution_comment(),
         "DefaultCacheBehavior": {
             "TargetOriginId": f"alb-{project_name}",
             "ViewerProtocolPolicy": "redirect-to-https",
@@ -4704,18 +4764,6 @@ def main():
             s3_vectors_info, knowledge_base_role_arn, s3_bucket_name
         )
         logger.info(f"Knowledge base created...")
-
-        # Install langgraph agent runtime using install_agent_runtime
-        install_agent_runtime("langgraph")
-        logger.info(f"Langgraph agent runtime installed...")
-
-        # Install kb-retriever mcp runtime using install_mcp_runtime
-        install_mcp_runtime("kb-retriever")
-        logger.info(f"Kb-retriever mcp runtime installed...")
-
-        # Install use-aws mcp runtime using install_mcp_runtime
-        install_mcp_runtime("use-aws")
-        logger.info(f"Use-aws mcp runtime installed...")
         
         # 5. Create VPC
         vpc_info = create_vpc()
@@ -4742,6 +4790,15 @@ def main():
         if write_application_config(app_environment):
             logger.info("Local testing is available while deployment continues:")
             logger.info("  streamlit run application/app.py")
+
+        # Install AgentCore / MCP runtimes after CloudFront so config.json gets sharing_url
+        install_agent_runtime("langgraph")
+        logger.info("Langgraph agent runtime installed...")
+        install_mcp_runtime("kb-retriever")
+        logger.info("Kb-retriever mcp runtime installed...")
+        install_mcp_runtime("use-aws")
+        logger.info("Use-aws mcp runtime installed...")
+
         repository_uri = create_ecr_repository()
         image_build_tag = None
         if args.skip_docker_build:

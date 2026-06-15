@@ -1,5 +1,6 @@
 import boto3
 from botocore.config import Config
+from botocore.exceptions import ClientError
 import json
 import os
 import logging
@@ -42,30 +43,29 @@ def tool_slot_update(notification_queue, slot_key: str, message: str):
     if notification_queue is not None:
         notification_queue.tool_update(slot_key, message)
 
-def load_agentcore_config(agent_name, agent_type=None):
-    """Resolve AgentCore runtime ARN from config or Bedrock control plane."""
-    direct_arn = config.get("agent_runtime_arn")
-    if direct_arn:
-        logger.info(f"Using agent_runtime_arn from config: {direct_arn}")
-        return direct_arn
+def _runtime_id_from_arn(arn: str) -> str:
+    """Extract agentRuntimeId from an AgentCore runtime ARN."""
+    return arn.rsplit("/", 1)[-1] if arn else ""
 
+
+def _candidate_runtime_names(agent_name: str, agent_type: str | None) -> list:
+    names = [agent_name]
     if agent_type:
-        typed_arn = config.get(f"agent_runtime_arn_{agent_type}")
-        if typed_arn:
-            logger.info(f"Using agent_runtime_arn_{agent_type} from config: {typed_arn}")
-            return typed_arn
+        names.append(f"agent_runtime_{agent_type}")
+        names.append(f"{projectName.replace('-', '_')}_{agent_type}")
+    return names
 
-    candidate_names = [agent_name]
-    if agent_type:
-        candidate_names.append(f"agent_runtime_{agent_type}")
-        candidate_names.append(f"{projectName.replace('-', '_')}_{agent_type}")
 
+def _lookup_runtime_by_name(agent_name: str, agent_type: str | None) -> str | None:
+    """Find a READY AgentCore runtime ARN by candidate name."""
+    candidate_names = _candidate_runtime_names(agent_name, agent_type)
     client = boto3.client("bedrock-agentcore-control", region_name=bedrock_region)
     response = client.list_agent_runtimes()
-    logger.info(f"Looking up agent runtime in {len(response.get('agentRuntimes', []))} runtimes")
+    runtimes = response.get("agentRuntimes", [])
+    logger.info(f"Looking up agent runtime in {len(runtimes)} runtimes")
     logger.info(f"Candidate runtime names: {candidate_names}")
 
-    for agent_runtime in response.get("agentRuntimes", []):
+    for agent_runtime in runtimes:
         if agent_runtime.get("agentRuntimeName") in candidate_names:
             arn = agent_runtime.get("agentRuntimeArn")
             logger.info(f"Matched runtime '{agent_runtime.get('agentRuntimeName')}': {arn}")
@@ -73,6 +73,45 @@ def load_agentcore_config(agent_name, agent_type=None):
 
     logger.error(f"No agent runtime matched candidates: {candidate_names}")
     return None
+
+
+def _is_runtime_arn_valid(arn: str) -> bool:
+    """Return True if the AgentCore runtime ARN still exists."""
+    runtime_id = _runtime_id_from_arn(arn)
+    if not runtime_id:
+        return False
+
+    client = boto3.client("bedrock-agentcore-control", region_name=bedrock_region)
+    try:
+        client.get_agent_runtime(agentRuntimeId=runtime_id)
+        return True
+    except ClientError as e:
+        code = e.response.get("Error", {}).get("Code", "")
+        if code in ("ResourceNotFoundException", "ValidationException"):
+            return False
+        raise
+
+
+def load_agentcore_config(agent_name, agent_type=None):
+    """Resolve AgentCore runtime ARN from config or Bedrock control plane."""
+    configured_arns = []
+    direct_arn = config.get("agent_runtime_arn")
+    if direct_arn:
+        configured_arns.append(("agent_runtime_arn", direct_arn))
+    if agent_type:
+        typed_arn = config.get(f"agent_runtime_arn_{agent_type}")
+        if typed_arn and typed_arn not in {arn for _, arn in configured_arns}:
+            configured_arns.append((f"agent_runtime_arn_{agent_type}", typed_arn))
+
+    for key, arn in configured_arns:
+        if _is_runtime_arn_valid(arn):
+            logger.info(f"Using {key} from config: {arn}")
+            return arn
+        logger.warning(
+            f"Configured {key} is missing or deleted; falling back to runtime name lookup: {arn}"
+        )
+
+    return _lookup_runtime_by_name(agent_name, agent_type)
 
 def runtime_session_id_for(user_id: str, history_mode: str) -> str:
     """AgentCore runtimeSessionId (min length 33).

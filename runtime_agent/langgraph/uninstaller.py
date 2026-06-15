@@ -429,6 +429,24 @@ def delete_iam_resources():
         print(f"Error deleting IAM resources: {e}")
         return False
 
+def delete_local_config():
+    """Delete local config.json after AWS resources are removed."""
+    print(f"\n{'='*60}")
+    print("Deleting local config.json")
+    print(f"{'='*60}")
+
+    try:
+        if os.path.exists(config_path):
+            os.remove(config_path)
+            print(f"✓ Deleted {config_path}")
+        else:
+            print(f"config.json not found (may already be deleted): {config_path}")
+        return True
+    except OSError as e:
+        print(f"Error deleting config.json: {e}")
+        return False
+
+
 # ============================================================================
 # Main Function
 # ============================================================================
@@ -479,7 +497,9 @@ def main():
     for step_name, step_func in steps:
         if not step_func():
             print(f"\nWarning: Error occurred in step '{step_name}'.")
-            print("   Continuing with remaining steps...")    
+            print("   Continuing with remaining steps...")
+
+    delete_local_config()
 
     # Output final results
     print("\n" + "="*60)
