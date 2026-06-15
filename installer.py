@@ -2944,6 +2944,50 @@ def create_agentcore_memory_role() -> str:
     return role_arn
 
 
+def _cloudfront_s3_cache_behavior(path_pattern: str, s3_origin_id: str) -> Dict[str, object]:
+    """CloudFront cache behavior routing a path prefix to the S3 origin."""
+    return {
+        "PathPattern": path_pattern,
+        "TargetOriginId": s3_origin_id,
+        "ViewerProtocolPolicy": "redirect-to-https",
+        "AllowedMethods": {
+            "Quantity": 2,
+            "Items": ["GET", "HEAD"],
+            "CachedMethods": {
+                "Quantity": 2,
+                "Items": ["GET", "HEAD"],
+            },
+        },
+        "CachePolicyId": "4135ea2d-6df8-44a3-9df3-4b5a84be39ad",
+        "Compress": True,
+    }
+
+
+def _ensure_cloudfront_s3_path_behavior(dist_id: str, path_pattern: str, s3_origin_id: str) -> None:
+    """Add an S3 cache behavior to an existing CloudFront distribution if missing."""
+    dist_config_response = cloudfront_client.get_distribution_config(Id=dist_id)
+    dist_config = dist_config_response["DistributionConfig"]
+    etag = dist_config_response["ETag"]
+
+    cache_behaviors = dist_config.get("CacheBehaviors") or {"Quantity": 0, "Items": []}
+    items = list(cache_behaviors.get("Items") or [])
+
+    if any(item.get("PathPattern") == path_pattern for item in items):
+        logger.info(f"  CloudFront behavior already exists: {path_pattern}")
+        return
+
+    items.append(_cloudfront_s3_cache_behavior(path_pattern, s3_origin_id))
+    dist_config["CacheBehaviors"] = {"Quantity": len(items), "Items": items}
+
+    cloudfront_client.update_distribution(
+        Id=dist_id,
+        DistributionConfig=dist_config,
+        IfMatch=etag,
+    )
+    logger.info(f"  ✓ Added CloudFront behavior: {path_pattern} -> {s3_origin_id}")
+    logger.warning("  Note: CloudFront behavior changes may take 15-20 minutes to deploy")
+
+
 def create_cloudfront_distribution(alb_info: Dict[str, str], s3_bucket_name: str) -> Dict[str, str]:
     """Create CloudFront distribution with hybrid ALB + S3 origins."""
     logger.info("[7/10] Creating CloudFront distribution (ALB + S3 hybrid)")
@@ -2955,6 +2999,9 @@ def create_cloudfront_distribution(alb_info: Dict[str, str], s3_bucket_name: str
             if f"CloudFront-for-{project_name}" in dist.get("Comment", ""):
                 if dist.get("Enabled", False):
                     logger.warning(f"CloudFront distribution already exists: {dist['DomainName']}")
+                    _ensure_cloudfront_s3_path_behavior(
+                        dist["Id"], "/artifacts/*", f"s3-{project_name}"
+                    )
                     return {
                         "id": dist["Id"],
                         "domain": dist["DomainName"]
@@ -2980,6 +3027,9 @@ def create_cloudfront_distribution(alb_info: Dict[str, str], s3_bucket_name: str
                     )
                     
                     logger.info(f"  ✓ Enabled CloudFront distribution: {dist['DomainName']}")
+                    _ensure_cloudfront_s3_path_behavior(
+                        dist["Id"], "/artifacts/*", f"s3-{project_name}"
+                    )
                     logger.warning("  Note: CloudFront distribution may take 15-20 minutes to deploy")
                     
                     return {
@@ -3076,38 +3126,11 @@ def create_cloudfront_distribution(alb_info: Dict[str, str], s3_bucket_name: str
             "Compress": True
         },
         "CacheBehaviors": {
-            "Quantity": 2,
+            "Quantity": 3,
             "Items": [
-                {
-                    "PathPattern": "/images/*",
-                    "TargetOriginId": f"s3-{project_name}",
-                    "ViewerProtocolPolicy": "redirect-to-https",
-                    "AllowedMethods": {
-                        "Quantity": 2,
-                        "Items": ["GET", "HEAD"],
-                        "CachedMethods": {
-                            "Quantity": 2,
-                            "Items": ["GET", "HEAD"]
-                        }
-                    },
-                    "CachePolicyId": "4135ea2d-6df8-44a3-9df3-4b5a84be39ad",
-                    "Compress": True
-                },
-                {
-                    "PathPattern": "/docs/*",
-                    "TargetOriginId": f"s3-{project_name}",
-                    "ViewerProtocolPolicy": "redirect-to-https",
-                    "AllowedMethods": {
-                        "Quantity": 2,
-                        "Items": ["GET", "HEAD"],
-                        "CachedMethods": {
-                            "Quantity": 2,
-                            "Items": ["GET", "HEAD"]
-                        }
-                    },
-                    "CachePolicyId": "4135ea2d-6df8-44a3-9df3-4b5a84be39ad",
-                    "Compress": True
-                }
+                _cloudfront_s3_cache_behavior("/images/*", f"s3-{project_name}"),
+                _cloudfront_s3_cache_behavior("/docs/*", f"s3-{project_name}"),
+                _cloudfront_s3_cache_behavior("/artifacts/*", f"s3-{project_name}"),
             ]
         },
         "Origins": {
@@ -3159,7 +3182,7 @@ def create_cloudfront_distribution(alb_info: Dict[str, str], s3_bucket_name: str
         logger.info(f"✓ CloudFront distribution created (ALB + S3): {distribution_domain}")
         logger.info(f"  Distribution ID: {distribution_id}")
         logger.info(f"  Default origin: ALB {alb_info['dns']}")
-        logger.info(f"  /images/* and /docs/* origins: S3 bucket {s3_bucket_name}")
+        logger.info(f"  /images/*, /docs/*, /artifacts/* origins: S3 bucket {s3_bucket_name}")
         logger.warning("  Note: CloudFront distribution may take 15-20 minutes to deploy")
         
     except ClientError as e:
