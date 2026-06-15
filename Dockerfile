@@ -5,15 +5,8 @@ WORKDIR /app
 RUN apt-get update && apt-get install -y --no-install-recommends curl \
     && rm -rf /var/lib/apt/lists/*
 
-# Install Python packages
-RUN pip install streamlit streamlit-chat
-RUN pip install boto3 langchain_aws langchain langchain_community langgraph langchain_experimental langgraph-supervisor langgraph-swarm langchain-text-splitters
-RUN pip install mcp langchain-mcp-adapters
-RUN pip install pandas numpy
-RUN pip install tavily-python==0.5.0 pytz>=2025.2
-RUN pip install beautifulsoup4==4.12.3 plotly_express==0.4.1 matplotlib==3.10.0 PyPDF2==3.0.1
-RUN pip install opensearch-py wikipedia aioboto3 requests
-RUN pip install uv kaleido diagrams graphviz rich colorama
+# Install Python packages (ECS Streamlit app only; agent runs on AgentCore)
+RUN pip install streamlit boto3 langchain_aws requests
 
 RUN mkdir -p /root/.streamlit
 COPY config.toml /root/.streamlit/

@@ -3272,7 +3272,6 @@ def _merge_runtime_agent_settings(app_config: Dict[str, str]) -> Dict[str, str]:
     agent_runtime_arn = runtime_config.get("agent_runtime_arn")
     if agent_runtime_arn:
         app_config["agent_runtime_arn"] = agent_runtime_arn
-        app_config["agent_runtime_arn_langgraph"] = agent_runtime_arn
     agent_runtime_role = runtime_config.get("agent_runtime_role")
     if agent_runtime_role:
         app_config["agent_runtime_role"] = agent_runtime_role

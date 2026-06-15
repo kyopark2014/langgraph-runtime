@@ -78,7 +78,10 @@ def load_config(mcp_type):
             "mcpServers": {
                 "kb-retriever": {
                     "command": "python",
-                    "args": [f"{workingDir}/mcp_server_retrieve.py"]
+                    "args": [f"{workingDir}/mcp_server_retrieve.py"],
+                    "env": {
+                        "PYTHONPATH": workingDir,
+                    },
                 }
             }
         }
