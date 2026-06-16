@@ -14,55 +14,52 @@ AgentCore의 runtime은 배포를 위해 Docker를 이용합니다. 현재(2025.
 
 ### Operation Architecture
 
-Streamlit UI(`application/app.py`)에서 Agent 타입·MCP·모델·플랫폼을 선택하면 `agentcore_client.py`가 AgentCore Runtime(`invoke_agent_runtime`) 또는 로컬 Docker(`localhost:8080`)로 요청을 보냅니다. Runtime은 `runtime_agent/{langgraph,strands,claude}/agent.py`의 `BedrockAgentCoreApp` 엔트리포인트에서 MCP와 내장 도구를 연결한 뒤 Amazon Bedrock으로 추론합니다. MCP 서버(`kb-retriever`, `use-aws`)는 `runtime_mcp/`에 별도 AgentCore Runtime으로 배포됩니다.
+Streamlit UI(`application/app.py`)에서 MCP·Skill·모델·대화 모드를 선택하면 `agentcore_client.py`가 AgentCore Runtime(`invoke_agent_runtime`)으로 요청을 보냅니다. Runtime은 `runtime_agent/langgraph/agent.py`의 `BedrockAgentCoreApp` 엔트리포인트에서 LangGraph 워크플로우를 실행하고, 선택된 MCP는 `mcp_config.py`에 따라 **동일 컨테이너 내 stdio 서브프로세스**로 기동됩니다. Skill은 `runtime_agent/langgraph/skills/`의 `SKILL.md`와 `get_skill_instructions` 도구로 제공되며, MCP와는 별도 체계입니다.
 
 ```mermaid
 flowchart TB
   subgraph UI["Streamlit (application/app.py)"]
     MODE["Agent / Agent (Chat)"]
-    SEL["MCP · 모델 · 플랫폼 · Agent 타입 선택"]
+    SEL["MCP · Skill · 모델 선택"]
   end
 
   subgraph Client["application/agentcore_client.py"]
     RA[run_agent]
-    RD[run_agent_in_docker]
+    RD["run_agent_in_docker (로컬 개발)"]
   end
 
-  subgraph Runtime["AgentCore Runtime / Docker"]
-    LG["langgraph/agent.py"]
-    ST["strands/agent.py"]
-    CL["claude/agent.py"]
+  subgraph Runtime["AgentCore Runtime (runtime_agent/langgraph/)"]
+    AG["agent.py · BedrockAgentCoreApp"]
+    CHAT["chat.py · MemorySaver / bind_memory"]
+    LGA["langgraph_agent.py · StateGraph + astream"]
   end
 
-  subgraph LangGraphStack["LangGraph (langgraph_agent.py)"]
-    LGA[StateGraph + astream]
-    LGB["Built-in: execute_code, bash, read/write_file, upload_file_to_s3"]
-    LGM[MultiServerMCPClient]
-    LGC[ChatBedrock]
+  subgraph BuiltIn["Built-in Tools (langgraph_agent.py)"]
+    LGB["execute_code, bash, read/write_file, upload_file_to_s3, get_current_time"]
   end
 
-  subgraph StrandsStack["Strands (strands_agent.py)"]
-    SSA[Agent + stream_async]
-    SSB["Built-in: execute_code, bash, upload_file_to_s3"]
-    SST["strands_tools: current_time, file_read, file_write"]
-    SSM[MCPClientManager]
-    SSBM[BedrockModel]
-  end
-
-  subgraph ClaudeStack["Claude Agent SDK (claude_agent.py)"]
-    CSA[ClaudeSDKClient + query]
-    CSM[MCP servers via ClaudeAgentOptions]
+  subgraph Skills["Skills (skill.py + skills/)"]
+    SKM[SkillManager]
+    SKT[get_skill_instructions]
+    SKD["docx, pptx, xlsx, pdf, skill-creator, ..."]
   end
 
   subgraph MCPConfig["MCP Config (mcp_config.py)"]
     LSC[load_selected_config]
   end
 
-  subgraph MCPServers["MCP Servers (runtime_mcp/)"]
-    KB[kb-retriever · RAG retrieve]
-    UA[use-aws · AWS API]
+  subgraph MCPLocal["MCP Servers (stdio subprocess, 동일 컨테이너)"]
+    TV[tavily · 웹 검색]
+    KB[knowledge base · RAG retrieve]
     AD[aws documentation · uvx]
+    TI[trade info · 주식 시세]
+    WF[web_fetch · npx]
+    IG[image generation]
     UC[사용자 설정]
+  end
+
+  subgraph MCPClient["langchain-mcp-adapters"]
+    LGM[MultiServerMCPClient]
   end
 
   subgraph LLM["Amazon Bedrock"]
@@ -75,46 +72,26 @@ flowchart TB
   end
 
   MODE --> RA
-  MODE --> RD
   SEL --> RA
-  SEL --> RD
+  RD -.->|localhost:8080| AG
 
-  RA -->|invoke_agent_runtime| LG
-  RA --> ST
-  RA --> CL
-  RD -->|localhost:8080| LG
-  RD --> ST
-  RD --> CL
-
-  LG --> LGA
-  LGA --> LGC
+  RA -->|invoke_agent_runtime| AG
+  AG --> CHAT
+  CHAT --> LGA
+  LGA --> BR
   LGA --> LGB
   LGA --> LGM
-  LGC --> BR
+  LGA --> SKT
 
-  ST --> SSA
-  SSA --> SSBM
-  SSA --> SSB
-  SSA --> SST
-  SSA --> SSM
-  SSBM --> BR
+  SKT --> SKM
+  SKM --> SKD
 
-  CL --> CSA
-  CSA --> CSM
-  CSA --> BR
-
-  LG --> LSC
-  ST --> LSC
-  CL --> LSC
-  LSC --> MCPServers
-  LGM --> MCPServers
-  SSM --> MCPServers
-  CSM --> MCPServers
+  AG --> LSC
+  LSC --> MCPLocal
+  LGM --> MCPLocal
 
   LGB --> ART
   LGB --> S3
-  SSB --> ART
-  SSB --> S3
 ```
 
 | 모드 | 모듈 | 설명 |
@@ -122,10 +99,13 @@ flowchart TB
 | **Agent** | `application/app.py` → `agentcore_client.run_agent` | 단일 턴 Agent. `history_mode=Disable`로 매 요청을 독립 처리 |
 | **Agent (Chat)** | `application/app.py` → `agentcore_client.run_agent` | 대화 이력 유지. `history_mode=Enable`로 세션 기반 interactive 대화 |
 | LangGraph Runtime | `runtime_agent/langgraph/agent.py` | LangGraph StateGraph + `MultiServerMCPClient` + 내장 도구 |
-| MCP (RAG) | `runtime_mcp/iam_auth/kb-retriever/` | Bedrock Knowledge Base `retrieve` 도구를 AgentCore MCP Runtime으로 제공 |
-| MCP (AWS) | `runtime_mcp/iam_auth/use-aws/` | AWS API 호출 도구를 AgentCore MCP Runtime으로 제공 |
+| Skill | `runtime_agent/langgraph/skill.py` · `skills/` | `SKILL.md` 기반 지침. UI `skills.list`에서 선택 후 `get_skill_instructions`로 로드 |
+| MCP (로컬 stdio) | `runtime_agent/langgraph/mcp_server_*.py` | Agent 컨테이너 안에서 subprocess로 기동 (`mcp_config.py`가 command/args 정의) |
+| MCP (RAG) | `mcp_server_retrieve.py` | Bedrock Knowledge Base `retrieve` 도구 |
+| MCP (주식) | `mcp_server_trade_info.py` | `retrieve_stock_trend`, `draw_stock_trend` |
+| Streamlit 앱 | 루트 `Dockerfile` → ECS | `application/`만 포함. Agent 추론은 AgentCore에서 수행 |
 
-플랫폼은 **AgentCore**(서버리스 Runtime)와 **Docker**(로컬 `localhost:8080`) 중 선택할 수 있으며, Agent 타입은 **langgraph** / **strands** / **claude** 중 하나를 선택합니다. MCP는 UI에서 `kb-retriever`, `use-aws`, `aws document`, `사용자 설정`을 체크박스로 선택합니다.
+UI에서 MCP는 `application/mcp.list` 기준으로 `tavily`, `knowledge base`, `aws documentation`, `trade info`, `web_fetch`, `image generation`, `사용자 설정`을 체크박스로 선택합니다. Skill은 `application/skills.list`에서 `docx`, `pptx`, `xlsx`, `skill-creator` 등을 별도로 선택합니다. 로컬 개발 시에는 `agentcore_client.run_agent_in_docker`로 `runtime_agent/langgraph/Dockerfile` 이미지(`localhost:8080`)에 직접 요청할 수 있습니다.
 
 ### AgentCore 소개
 
