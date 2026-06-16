@@ -957,13 +957,18 @@ if __name__ == "__main__":
 
 ## 실행 결과
 
-MCP server에서 "use_aws"를 선택하고, "내 cloudwatch 로그 리스트는?"라고 입력하면 AWS CLI를 이용해 AWS cloudwatch의 로그 리스트를 확인하여 아래와 같이 보여줍니다.
+"https://github.com/kyopark2014/strands-runtime/blob/main/README.md 을 정리해줘."와 같이 입력하면 웹의 정보를 편리하게 활용할 수 있습니다.
 
-<img width="724" height="732" alt="image" src="https://github.com/user-attachments/assets/58191496-eee0-4dbb-ab9a-7ddb71340e69" />
+<img width="728" height="729" alt="image" src="https://github.com/user-attachments/assets/c3a18138-ba1c-4956-90b4-d55a0737da33" />
 
-"tavily search"를 선택하고, "강남역 맛집은?"이라고 검색하면 아래와 같이 강남역에 대한 정보를 검색하여 얻어진 결과를 보여줍니다.
+이때의 결과는 아래와 같습니다.
 
-<img width="723" height="662" alt="image" src="https://github.com/user-attachments/assets/cbb1241d-8f17-4894-a43c-2d578e2987e2" />
+<img width="663" height="780" alt="image" src="https://github.com/user-attachments/assets/6b4ed348-c923-46d7-838b-da8f54e123f8" />
+
+
+"aws document로 agent evalutation 에 대해 조사해줘."로 하면 필요한 정보를 조회하여 정리합니다.
+
+<img width="720" height="706" alt="image" src="https://github.com/user-attachments/assets/fb5eb40e-720e-420f-ad3b-8aafceab236e" />
 
 
 
