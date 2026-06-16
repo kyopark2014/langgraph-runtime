@@ -18,64 +18,64 @@ Streamlit UI(`application/app.py`)에서 MCP·Skill·모델·대화 모드를 �
 
 ```mermaid
 flowchart TB
-  subgraph UI["Streamlit (application/app.py)"]
-    MODE["Agent / Agent (Chat)"]
-    SEL["MCP · Skill · 모델 선택"]
+  subgraph UI["Streamlit app.py"]
+    MODE["Mode: Agent or Agent Chat"]
+    SEL["Select MCP Skill Model"]
   end
 
-  subgraph Client["application/agentcore_client.py"]
+  subgraph Client["agentcore_client.py"]
     RA[run_agent]
-    RD["run_agent_in_docker (로컬 개발)"]
+    RD["run_agent_in_docker local"]
   end
 
-  subgraph Runtime["AgentCore Runtime (runtime_agent/langgraph/)"]
-    AG["agent.py · BedrockAgentCoreApp"]
-    CHAT["chat.py · MemorySaver / bind_memory"]
-    LGA["langgraph_agent.py · StateGraph + astream"]
+  subgraph Runtime["AgentCore runtime_agent/langgraph"]
+    AG["agent.py BedrockAgentCoreApp"]
+    CHAT["chat.py MemorySaver bind_memory"]
+    LGA["langgraph_agent.py StateGraph astream"]
   end
 
-  subgraph BuiltIn["Built-in Tools (langgraph_agent.py)"]
-    LGB["execute_code, bash, read/write_file, upload_file_to_s3, get_current_time"]
+  subgraph BuiltIn["Built in tools"]
+    LGB["execute_code bash read_file write_file upload_file_to_s3 get_current_time"]
   end
 
-  subgraph Skills["Skills (skill.py + skills/)"]
+  subgraph Skills["Skills skill.py skills"]
     SKM[SkillManager]
     SKT[get_skill_instructions]
-    SKD["docx, pptx, xlsx, pdf, skill-creator, ..."]
+    SKD["docx pptx xlsx pdf skill_creator and more"]
   end
 
-  subgraph MCPConfig["MCP Config (mcp_config.py)"]
+  subgraph MCPConfig["MCP config mcp_config.py"]
     LSC[load_selected_config]
   end
 
-  subgraph MCPLocal["MCP Servers (stdio subprocess, 동일 컨테이너)"]
-    TV[tavily · 웹 검색]
-    KB[knowledge base · RAG retrieve]
-    AD[aws documentation · uvx]
-    TI[trade info · 주식 시세]
-    WF[web_fetch · npx]
+  subgraph MCPLocal["MCP servers stdio subprocess same container"]
+    TV["tavily web search"]
+    KB["knowledge base RAG retrieve"]
+    AD["aws documentation uvx"]
+    TI["trade info stock trend"]
+    WF["web_fetch npx"]
     IG[image generation]
-    UC[사용자 설정]
+    UC["user config"]
   end
 
-  subgraph MCPClient["langchain-mcp-adapters"]
+  subgraph MCPClient["langchain mcp adapters"]
     LGM[MultiServerMCPClient]
   end
 
-  subgraph LLM["Amazon Bedrock"]
+  subgraph LLM["Amazon Bedrock runtime"]
     BR[Bedrock Runtime]
   end
 
-  subgraph Storage["Artifacts / S3"]
-    ART[artifacts/]
+  subgraph Storage["Artifacts and S3"]
+    ART[artifacts]
     S3[(S3)]
   end
 
   MODE --> RA
   SEL --> RA
-  RD -.->|localhost:8080| AG
+  RD -.-> AG
 
-  RA -->|invoke_agent_runtime| AG
+  RA --> AG
   AG --> CHAT
   CHAT --> LGA
   LGA --> BR
