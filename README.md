@@ -11,7 +11,7 @@
 <img width="1000" alt="image" src="https://github.com/user-attachments/assets/fdf44942-8534-4c52-8b01-842c465f0e96" />
 
 AgentCore의 runtime은 배포를 위해 Docker를 이용합니다. 현재(2025.7) 기준으로 arm64와 1GB 이하의 docker image를 지원합니다.
-
+ 
 ### Operation Architecture
 
 Streamlit UI(`application/app.py`)에서 MCP·Skill·모델·대화 모드를 선택하면 `agentcore_client.py`가 AgentCore Runtime(`invoke_agent_runtime`)으로 요청을 보냅니다. Runtime은 `runtime_agent/langgraph/agent.py`의 `BedrockAgentCoreApp` 엔트리포인트에서 LangGraph 워크플로우를 실행하고, 선택된 MCP는 `mcp_config.py`에 따라 **동일 컨테이너 내 stdio 서브프로세스**로 기동됩니다. Skill은 `runtime_agent/langgraph/skills/`의 `SKILL.md`와 `get_skill_instructions` 도구로 제공되며, MCP와는 별도 체계입니다.
