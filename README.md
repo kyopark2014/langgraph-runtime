@@ -486,61 +486,6 @@ async def agent_langgraph(payload):
                         yield({'toolResult': toolResult, 'toolUseId': toolUseId})
 ```
 
-#### Strands 
-
-[Strands - agent.py](./strands_stream/agent.py)와 같이 stream으로 처리합니다. 아래와 같이 AgentCore를 endpoint로 지정할 때에 agent_stream의 값을 yeild로 전달하면 streamlit 같은 client에서 동적으로 응답을 받을 수 있습니다.
-
-```python
-from bedrock_agentcore.runtime import BedrockAgentCoreApp
-app = BedrockAgentCoreApp()
-
-@app.entrypoint
-async def agentcore_strands(payload):
-    # initiate agent
-    await initiate_agent(
-        system_prompt=None, 
-        strands_tools=strands_tools, 
-        mcp_servers=mcp_servers, 
-        historyMode='Disable'
-    )
-
-    # run agent
-    with mcp_manager.get_active_clients(mcp_servers) as _:
-        agent_stream = agent.stream_async(query)
-
-        async for event in agent_stream:
-            text = ""            
-            if "data" in event:
-                text = event["data"]
-                stream = {'data': text}
-            elif "result" in event:
-                final = event["result"]                
-                message = final.message
-                if message:
-                    content = message.get("content", [])
-                    result = content[0].get("text", "")
-                    stream = {'result': result}
-            elif "current_tool_use" in event:
-                current_tool_use = event["current_tool_use"]
-                name = current_tool_use.get("name", "")
-                input = current_tool_use.get("input", "")
-                toolUseId = current_tool_use.get("toolUseId", "")
-                text = f"name: {name}, input: {input}"
-                stream = {'tool': name, 'input': input, 'toolUseId': toolUseId}            
-            elif "message" in event:
-                message = event["message"]
-                if "content" in message:
-                    content = message["content"]
-                    if "toolResult" in content[0]:
-                        toolResult = content[0]["toolResult"]
-                        toolUseId = toolResult["toolUseId"]
-                        toolContent = toolResult["content"]
-                        toolResult = toolContent[0].get("text", "")
-                        stream = {'toolResult': toolResult, 'toolUseId': toolUseId}
-
-            yield (stream)
-```
-
 #### Client
 
 AgentCore로 agent_runtime_arn을 이용해 request에 대한 응답을 얻습니다. 이때 content-type이 "text/event-stream"인 경우에 prefix인 "data:"를 제거한 후에 json parser를 이용해 얻어진 값을 목적에 맞게 활용합니다.
