@@ -59,10 +59,10 @@ chat.user_id = st.session_state.user_id
 
 mode_descriptions = {
     "Agent": [
-        "MCP를 활용한 Agent를 이용합니다. 왼쪽 메뉴에서 필요한 MCP를 선택하세요."
+        "MCP/SKILL를 활용한 Agent를 이용합니다. 왼쪽 메뉴에서 필요한 MCP를 선택하세요."
     ],
     "Agent (Chat)": [
-        "MCP를 활용한 Agent를 이용합니다. 채팅 히스토리를 이용해 interative한 대화를 즐길 수 있습니다."
+        "MCP/SKILL를 활용한 Agent를 이용합니다. 채팅 히스토리를 이용해 interative한 대화를 즐길 수 있습니다."
     ]
 }
 
@@ -146,7 +146,11 @@ with st.sidebar:
             "Claude 4.6 Opus",
             "Claude 4.5 Opus",
             "Claude 4.5 Sonnet",
-            "Claude 4.5 Haiku"
+            "Claude 4.5 Haiku",
+            "OpenAI GPT 5.4",
+            "OpenAI GPT 5.5",
+            "OpenAI OSS 120B",
+            "OpenAI OSS 20B",
         ), index=0
     )
     chat.update(modelName)

@@ -7,6 +7,7 @@ import uuid
 import base64
 import info 
 import utils
+import bedrock_data_retention
 import langgraph_agent
 import mcp_config
 import skill
@@ -16,6 +17,7 @@ from urllib import parse
 from io import BytesIO
 from PIL import Image
 from langchain_aws import ChatBedrock
+from langchain_openai import ChatOpenAI
 from botocore.config import Config
 from botocore.exceptions import ClientError
 from langchain_core.prompts import MessagesPlaceholder, ChatPromptTemplate
@@ -150,21 +152,69 @@ def get_max_output_tokens(model_id: str = "") -> int:
         return 64000
     return 8192
     
+def _build_openai_chat(profile: dict, max_output_tokens: int):
+    """Build OpenAI-on-Bedrock chat model (Mantle Responses API or invoke_model)."""
+    bedrock_region = profile["bedrock_region"]
+    model_id = profile["model_id"]
+    mantle_api = profile.get("mantle_api", "chat")
+
+    if mantle_api == "responses":
+        def bearer_token_provider() -> str:
+            return bedrock_data_retention.get_bedrock_bearer_token(bedrock_region)
+
+        return ChatOpenAI(
+            model=model_id,
+            api_key=bearer_token_provider,
+            base_url=f"https://bedrock-mantle.{bedrock_region}.api.aws/openai/v1",
+            use_responses_api=True,
+            max_tokens=max_output_tokens,
+        )
+
+    boto3_bedrock = boto3.client(
+        service_name="bedrock-runtime",
+        region_name=bedrock_region,
+        config=Config(
+            retries={"max_attempts": 30},
+            read_timeout=300,
+        ),
+    )
+    chat = ChatBedrock(
+        model_id=model_id,
+        client=boto3_bedrock,
+        model_kwargs={
+            "max_tokens": max_output_tokens,
+            "temperature": 0.1,
+        },
+        region_name=bedrock_region,
+    )
+    chat.streaming = False
+    return chat
+
 def get_chat():
     global model_type
 
     logger.info(f"models: {models}")
-    
-    modelId = models[0]['model_id']
-    model_type = models[0]['model_type']
+
+    profile = models[0]
+    modelId = profile['model_id']
+    model_type = profile['model_type']
+    bedrock_region = profile['bedrock_region']
     if model_type == 'claude':
         maxOutputTokens = get_max_output_tokens(modelId)
     else:
         maxOutputTokens = 5120 # 5k
 
-    logger.info(f"modelId: {modelId}, model_type: {model_type}")
+    logger.info(f"modelId: {modelId}, model_type: {model_type}, bedrock_region: {bedrock_region}")
 
-    STOP_SEQUENCE = "\n\nHuman:" 
+    if profile["model_type"] == "openai":
+        return _build_openai_chat(profile, maxOutputTokens)
+
+    if profile['model_type'] == 'nova':
+        STOP_SEQUENCE = '"\n\n<thinking>", "\n<thinking>", " <thinking>"'
+    elif profile['model_type'] == 'claude':
+        STOP_SEQUENCE = "\n\nHuman:"
+    else:
+        STOP_SEQUENCE = ""
                           
     # bedrock   
     boto3_bedrock = boto3.client(
@@ -183,13 +233,16 @@ def get_chat():
         "stop_sequences": [STOP_SEQUENCE]
     }
 
-    chat = ChatBedrock(   # new chat model
-        model_id=modelId,
-        client=boto3_bedrock, 
-        model_kwargs=parameters,
-        region_name=utils.bedrock_region,
-        provider="anthropic"
-    )
+    chat_kwargs = {
+        "model_id": modelId,
+        "client": boto3_bedrock,
+        "model_kwargs": parameters,
+        "region_name": bedrock_region,
+    }
+    if model_type == "claude":
+        chat_kwargs["provider"] = "anthropic"
+
+    chat = ChatBedrock(**chat_kwargs)
     
     return chat
 
