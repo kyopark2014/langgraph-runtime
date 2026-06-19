@@ -30,7 +30,7 @@ flowchart TB
 
   subgraph Runtime["AgentCore runtime_agent/langgraph"]
     AG["agent.py BedrockAgentCoreApp"]
-    CHAT["chat.py MemorySaver bind_memory"]
+    CHAT["chat.py AsyncSqliteSaver bind_memory"]
     LGA["langgraph_agent.py StateGraph astream"]
   end
 
@@ -115,6 +115,128 @@ UI에서 MCP는 `application/mcp.list` 기준으로 `tavily`, `knowledge base`, 
 - AgentCore Observability: 상용 환경에서 개발자가 agent의 동작을 trace, debug, monitor 할 수 있습니다.
 
 ## Runtime Agent
+
+LangGraph agent는 [runtime_agent/langgraph/](./runtime_agent/langgraph/)에 구현되어 있으며, AgentCore Runtime 컨테이너에서 `agent.py`의 `BedrockAgentCoreApp` 엔트리포인트로 실행됩니다.
+
+## Session Storage
+
+AgentCore Runtime에서 대화 context를 유지하려면 **Session Storage**를 사용합니다. `create_agent_runtime` 시 `filesystemConfigurations`에 `sessionStorage`를 설정하면, `invoke_agent_runtime`의 **`runtimeSessionId`마다** 컨테이너에 임시 디스크가 마운트됩니다. 이 프로젝트에서는 LangGraph checkpointer가 해당 경로의 SQLite 파일에 대화 이력을 저장합니다.
+
+### Runtime 생성 시 sessionStorage 설정
+
+[runtime_agent/langgraph/installer.py](./runtime_agent/langgraph/installer.py)에서 runtime을 생성할 때 아래와 같이 `/mnt/workspace`를 마운트합니다. (`/mnt/` 하위 경로 필수)
+
+```python
+client = boto3.client('bedrock-agentcore-control', region_name=aws_region)
+
+response = client.create_agent_runtime(
+    agentRuntimeName=runtime_name,
+    agentRuntimeArtifact={
+        'containerConfiguration': {
+            'containerUri': f"{account_id}.dkr.ecr.{aws_region}.amazonaws.com/{repository_name}:{image_tag}"
+        }
+    },
+    filesystemConfigurations=[
+        {
+            "sessionStorage": {
+                "mountPath": "/mnt/workspace"
+            }
+        }
+    ],
+    networkConfiguration={"networkMode": "PUBLIC"},
+    roleArn=agent_runtime_role
+)
+```
+
+### LangGraph checkpointer 연동
+
+기존 `MemorySaver`는 프로세스 메모리에만 저장되어 컨테이너가 재시작되면 history가 사라집니다. `history_mode=Enable`일 때 [runtime_agent/langgraph/chat.py](./runtime_agent/langgraph/chat.py)의 `ensure_checkpointer()`가 **AsyncSqliteSaver**를 초기화하고, `buildChatAgentWithHistory()`가 이를 checkpointer로 사용합니다.
+
+| 구분 | Strands (참고) | LangGraph (본 프로젝트) |
+|------|----------------|-------------------------|
+| 저장소 | `FileSessionManager(storage_dir="/mnt/workspace")` | `AsyncSqliteSaver` → `/mnt/workspace/langgraph_checkpoints.sqlite` |
+| 세션 키 | `session_id` | `config["configurable"]["thread_id"]` |
+
+```python
+# chat.py — 요약
+SESSION_STORAGE_DIR = os.environ.get("SESSION_STORAGE_DIR", "/mnt/workspace")
+CHECKPOINT_DB = os.path.join(SESSION_STORAGE_DIR, "langgraph_checkpoints.sqlite")
+
+async def ensure_checkpointer():
+    saver = AsyncSqliteSaver.from_conn_string(CHECKPOINT_DB)
+    checkpointer = await saver.__aenter__()
+    await checkpointer.setup()
+    return checkpointer
+```
+
+`buildChatAgentWithHistory()`는 아래와 같이 checkpointer를 compile 시 전달합니다.
+
+```python
+return workflow.compile(
+    checkpointer=chat.checkpointer,
+    store=chat.memorystore
+)
+```
+
+대화는 `thread_id`로 구분됩니다. MCP·Skill 구성이 바뀌면 scope 해시가 달라져 별도 thread로 취급됩니다.
+
+```python
+thread_id = memory_scope if history_mode == "Enable" else user_id
+config = {
+    "configurable": {
+        "thread_id": thread_id,
+        "tools": tools,
+        "system_prompt": system_prompt,
+    },
+}
+```
+
+### 클라이언트 runtimeSessionId
+
+Streamlit 클라이언트([application/agentcore_client.py](./application/agentcore_client.py))는 history 모드에서 **user_id 기반 고정 `runtimeSessionId`**를 사용합니다. 같은 사용자가 재접속해도 동일한 `/mnt/workspace`가 붙어 SQLite checkpoint를 이어서 읽을 수 있습니다.
+
+```python
+def runtime_session_id_for(user_id: str, history_mode: str) -> str:
+    if history_mode == "Enable" and user_id:
+        seed = f"agentcore-session-{user_id}"
+        session_id = str(uuid.uuid5(uuid.NAMESPACE_DNS, seed))
+    else:
+        session_id = str(uuid.uuid4())
+    return session_id
+```
+
+```mermaid
+sequenceDiagram
+    participant UI as Streamlit
+    participant Client as agentcore_client
+    participant AC as AgentCore Runtime
+    participant LG as LangGraph
+
+    UI->>Client: history_mode=Enable, user_id
+    Client->>AC: invoke(runtimeSessionId=uuid5(user_id))
+    Note over AC: /mnt/workspace 마운트
+    AC->>LG: astream(..., thread_id=user_id:scope)
+    LG->>LG: AsyncSqliteSaver → langgraph_checkpoints.sqlite
+    Client->>AC: 다음 턴 (동일 runtimeSessionId)
+    LG->>LG: thread_id로 이전 checkpoint 로드
+```
+
+### 환경 변수
+
+| 변수 | 기본값 | 설명 |
+|------|--------|------|
+| `SESSION_STORAGE_DIR` | `/mnt/workspace` | checkpoint SQLite 디렉터리 |
+| `SESSION_STORAGE_ENABLED` | `true` | `false`이면 `MemorySaver`로 폴백 |
+
+로컬에서 session storage 없이 실행할 때는 `SESSION_STORAGE_DIR`이 없으면 `runtime_agent/langgraph/.session_storage`를 사용합니다.
+
+### 주의사항
+
+- **세션 범위**: `/mnt/workspace`는 `runtimeSessionId` 수명에 묶인 **임시 저장소**입니다. 세션이 종료되면 데이터가 사라질 수 있습니다. 장기 보관이 필요하면 S3, DynamoDB, RDS 등을 별도로 고려하세요.
+- **요청마다 agent 재생성**: `agent.py`는 매 요청 `create_agent()`를 호출하지만, checkpointer가 파일에 있으면 `thread_id`만 같으면 history를 복원합니다.
+- **`InMemoryStore`는 휘발성**: `store=chat.memorystore`는 LangGraph Store API용이며 메모리에만 있습니다. 대화 history만 필요하면 checkpointer만으로 충분합니다.
+- **의존성**: [runtime_agent/langgraph/Dockerfile](./runtime_agent/langgraph/Dockerfile)에 `langgraph-checkpoint-sqlite`, `aiosqlite`가 포함되어 있습니다.
+
 
 ## Runtime MCP
 
@@ -267,50 +389,6 @@ async def agent_langgraph(payload):
                     final_output = {"messages": [value], "image_url": []}
 ```
 
-
-#### Session Strogage
-
-AgentCore Runtime에서 context를 관리하기 위해 Session Strage를 활용할 수 있습니다.
-
-```python
-client = boto3.client('bedrock-agentcore-control', region_name=aws_region)
-
-response = client.create_agent_runtime(
-    agentRuntimeName=runtime_name,
-    agentRuntimeArtifact={
-        'containerConfiguration': {
-            'containerUri': f"{account_id}.dkr.ecr.{aws_region}.amazonaws.com/{repository_name}:{image_tag}"
-        }
-    },
-    filesystemConfigurations=[
-        {
-            "sessionStorage": {
-                "mountPath": "/mnt/workspace"  # /mnt/ 하위 경로 필수
-            }
-        }
-    ]
-    networkConfiguration={"networkMode": "PUBLIC"}, 
-    roleArn=agent_runtime_role
-)
-```
-
-filesystemConfigurations에서 설정한 Session Storage는 runtime에서 아래처럼 Session Manager를 이용해 활용할 수 있습니다.
-
-```python
-from strands import Agent
-from strands.session.file_session_manager import FileSessionManager
-
-# Create a session manager with a unique session ID 
-session_manager = FileSessionManager(
-	session_id="test-session”,
-	storage_dir="/mnt/workspace"
-)
-
-# Create an agent with the session manager
-agent = Agent(session_manager=session_manager)
-
-agent("Hello!") # This conversation is persisted
-```
 
 
 ### AgentCore Runtime으로 Agent 배포하기

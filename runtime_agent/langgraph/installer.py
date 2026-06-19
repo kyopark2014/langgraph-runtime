@@ -936,6 +936,13 @@ def create_agent_runtime_func(config, repository_name, image_tag):
                     'containerUri': f"{account_id}.dkr.ecr.{aws_region}.amazonaws.com/{repository_name}:{image_tag}"
                 }
             },
+            filesystemConfigurations=[
+                {
+                    "sessionStorage": {
+                        "mountPath": "/mnt/workspace"  # /mnt/ 하위 경로 필수
+                    }
+                }
+            ],
             networkConfiguration={"networkMode": "PUBLIC"}, 
             roleArn=agent_runtime_role
         )

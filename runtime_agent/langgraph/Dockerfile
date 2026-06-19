@@ -10,6 +10,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 RUN pip install boto3 botocore --upgrade
 RUN pip install langchain_aws langchain langchain_community langgraph langchain-openai "openai>=2.41.0" aws-bedrock-token-generator
+RUN pip install langgraph-checkpoint-sqlite aiosqlite
 RUN pip install mcp langchain-mcp-adapters
 RUN pip install bedrock-agentcore uv
 RUN pip install Pillow pytz tavily-python langchain-text-splitters
@@ -29,6 +30,7 @@ COPY . .
 ENV PYTHONPATH=/app
 # Minimal config (MCP/LangGraph agent without full RAG keys in config.json)
 ENV ALLOW_MISSING_RAG_CONFIG=1
+ENV SESSION_STORAGE_DIR=/mnt/workspace
 
 EXPOSE 8080
 

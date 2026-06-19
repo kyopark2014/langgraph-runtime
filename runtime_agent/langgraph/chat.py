@@ -28,6 +28,13 @@ from langchain_text_splitters import RecursiveCharacterTextSplitter
 from langgraph.checkpoint.memory import MemorySaver
 from langgraph.store.memory import InMemoryStore
 
+try:
+    from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
+    _SQLITE_CHECKPOINTER_AVAILABLE = True
+except ImportError:
+    AsyncSqliteSaver = None  # type: ignore[misc, assignment]
+    _SQLITE_CHECKPOINTER_AVAILABLE = False
+
 import logging
 import sys
 
@@ -90,11 +97,47 @@ def update(userId, modelName, debugMode):
         debug_mode = debugMode        
         logger.info(f"debug_mode: {debug_mode}")
 
-checkpointers = dict() 
-memorystores = dict() 
+SESSION_STORAGE_DIR = os.environ.get(
+    "SESSION_STORAGE_DIR",
+    "/mnt/workspace" if os.path.isdir("/mnt/workspace") else os.path.join(workingDir, ".session_storage"),
+)
+CHECKPOINT_DB = os.path.join(SESSION_STORAGE_DIR, "langgraph_checkpoints.sqlite")
+
+memorystores = dict()
 
 checkpointer = MemorySaver()
 memorystore = InMemoryStore()
+_sqlite_checkpointer = None
+_sqlite_checkpointer_cm = None
+
+
+def _session_storage_enabled() -> bool:
+    return os.environ.get("SESSION_STORAGE_ENABLED", "true").lower() not in ("0", "false", "no")
+
+
+async def ensure_checkpointer():
+    """Initialize AsyncSqliteSaver on AgentCore session storage (or local fallback)."""
+    global checkpointer, _sqlite_checkpointer, _sqlite_checkpointer_cm
+
+    if _sqlite_checkpointer is not None:
+        checkpointer = _sqlite_checkpointer
+        return checkpointer
+
+    if not _session_storage_enabled() or not _SQLITE_CHECKPOINTER_AVAILABLE:
+        logger.warning(
+            "Using in-memory checkpointer (SESSION_STORAGE_ENABLED=false or "
+            "langgraph-checkpoint-sqlite not installed)"
+        )
+        checkpointer = MemorySaver()
+        return checkpointer
+
+    os.makedirs(SESSION_STORAGE_DIR, exist_ok=True)
+    _sqlite_checkpointer_cm = AsyncSqliteSaver.from_conn_string(CHECKPOINT_DB)
+    _sqlite_checkpointer = await _sqlite_checkpointer_cm.__aenter__()
+    await _sqlite_checkpointer.setup()
+    checkpointer = _sqlite_checkpointer
+    logger.info(f"SQLite checkpointer ready: {CHECKPOINT_DB}")
+    return checkpointer
 
 
 def _memory_scope(mcp_servers: list, skill_list: list) -> str:
@@ -113,30 +156,29 @@ def _memory_scope(mcp_servers: list, skill_list: list) -> str:
 
 
 def bind_memory(mcp_servers: list, skill_list: list) -> str:
-    """Select or create checkpointer/memory store for the current config."""
-    global checkpointer, memorystore
+    """Select or create in-memory store for the current user/tool scope.
+
+    Conversation checkpoints are persisted in a shared SQLite file under
+    session storage; individual conversations are isolated by thread_id.
+    """
+    global memorystore
 
     scope = _memory_scope(mcp_servers, skill_list)
-    if scope in checkpointers:
+    if scope in memorystores:
         logger.info(f"memory exist. reuse scope: {scope}")
-        checkpointer = checkpointers[scope]
         memorystore = memorystores[scope]
     else:
         logger.info(f"memory not exist. create new scope: {scope}")
-        checkpointer = MemorySaver()
         memorystore = InMemoryStore()
-        checkpointers[scope] = checkpointer
         memorystores[scope] = memorystore
     return scope
 
 
 def initiate():
-    global checkpointer, memorystore, checkpointers, memorystores
+    global memorystore, memorystores
 
-    logger.info("reset all conversation memory scopes")
-    checkpointers.clear()
+    logger.info("reset in-memory store scopes (SQLite checkpoints are preserved)")
     memorystores.clear()
-    checkpointer = MemorySaver()
     memorystore = InMemoryStore()
 
 selected_chat = 0
@@ -1218,6 +1260,7 @@ async def create_agent(mcp_servers: list, skill_list: list, history_mode: str="D
     thread_id = memory_scope if history_mode == "Enable" else user_id
 
     if history_mode == "Enable":
+        await ensure_checkpointer()
         app = langgraph_agent.buildChatAgentWithHistory(tools)
         config = {
             "recursion_limit": 100,
