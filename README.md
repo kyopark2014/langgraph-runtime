@@ -238,34 +238,10 @@ sequenceDiagram
 - **의존성**: [runtime_agent/langgraph/Dockerfile](./runtime_agent/langgraph/Dockerfile)에 `langgraph-checkpoint-sqlite`, `aiosqlite`가 포함되어 있습니다.
 
 
-## Runtime MCP
-
-MCP 서버를 AgentCore runtime으로 배포하면 서비리스 기반으로 효율적으로 인프라를 관리하고 인증/보안과 같은 이슈도 쉽게 해결할 수 있습니다.
-
-현재 runtime은 IAM과 JWT token 방식의 인증을 제공합니다.
-
 
 ### IAM 인증
 
-Agent Runtime 배포 시 IAM 인증을 사용합니다. [create_agent_runtime](https://boto3.amazonaws.com/v1/documentation/api/latest/reference/services/bedrock-agentcore-control/client/create_agent_runtime.html)에서 authorizerConfiguration을 포함하지 않은 경우에 IAM으로 인증하게 됩니다. Runtime 생성시 client는 bedrock-agentcore-control을 사용하고 Agent 이미지에 대한 ECR 경로를 가지고 있어야 합니다. 상세한 코드는 [runtime_agent/langgraph/installer.py](./runtime_agent/langgraph/installer.py)을 참조합니다.
-
-```python
-client = boto3.client('bedrock-agentcore-control', region_name=aws_region)
-
-response = client.create_agent_runtime(
-    agentRuntimeName=runtime_name,
-    agentRuntimeArtifact={
-        'containerConfiguration': {
-            'containerUri': f"{account_id}.dkr.ecr.{aws_region}.amazonaws.com/{repository_name}:{image_tag}"
-        }
-    },
-    networkConfiguration={"networkMode": "PUBLIC"}, 
-    roleArn=agent_runtime_role,
-    protocolConfiguration={"serverProtocol": "MCP"}
-)
-
-print(f"✓ Agent runtime created: {response['agentRuntimeArn']}")
-```
+Agent Runtime 배포 시 IAM 인증을 사용합니다. [create_agent_runtime](https://boto3.amazonaws.com/v1/documentation/api/latest/reference/services/bedrock-agentcore-control/client/create_agent_runtime.html)에서 authorizerConfiguration을 포함하지 않은 경우에 IAM으로 인증하게 됩니다. Runtime 생성시 client는 bedrock-agentcore-control을 사용하고 Agent 이미지에 대한 ECR 경로를 가지고 있어야 합니다. 
 
 Agent에서 외부 AgentCore endpoint로 요청을 보낼때에는 아래와 같이 IAM 인증을 수행하기 위하여 request에 X-Amz-Security-Token을 포함합니다. 이를 위해 httpx의 event hook을 이용해 아래와 같이 구현할 수 있습니다. 상세코드는 [runtime_agent/langgraph/agent.py](./runtime_agent/langgraph/agent.py)을 참조합니다.
 
@@ -350,7 +326,7 @@ def patched_init(self, *args, **kwargs):
     original_init(self, *args, **kwargs)
 ```
 
-그리고 이를 tool을 실행할때 사용합니다.  
+Streamlit에서 입력하면 AgentCore endpoint로 전달되는데 이때에 아래와 같이 BedrockAgentCoreApp의 entrypoint로 받아서 실행합니다.
 
 ```python
 import httpx
