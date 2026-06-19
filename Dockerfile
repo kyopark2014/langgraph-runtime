@@ -6,7 +6,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends curl \
     && rm -rf /var/lib/apt/lists/*
 
 # Install Python packages (ECS Streamlit app only; agent runs on AgentCore)
-RUN pip install streamlit boto3 langchain_aws requests
+RUN pip install streamlit boto3 langchain_aws langchain-openai "openai>=2.41.0" aws-bedrock-token-generator requests
 
 RUN mkdir -p /root/.streamlit
 COPY config.toml /root/.streamlit/

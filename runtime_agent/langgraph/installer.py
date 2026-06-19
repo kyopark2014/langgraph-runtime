@@ -10,7 +10,6 @@ import sys
 import os
 import json
 import shutil
-import base64
 from datetime import datetime
 import boto3
 from botocore.exceptions import ClientError, NoCredentialsError
@@ -669,61 +668,90 @@ def ensure_ecr_repository(ecr_client, repository_name, region):
             print(f"Error: Failed to check repository: {e}")
             return False
 
+def check_docker_daemon(timeout: int = 30) -> bool:
+    """Verify Docker daemon is reachable before build/push."""
+    print("===== Checking Docker Daemon =====", flush=True)
+    try:
+        result = subprocess.run(
+            ["docker", "info"],
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+            check=False,
+        )
+        if result.returncode != 0:
+            print(f"Error: Docker daemon is not available: {result.stderr.strip()}")
+            return False
+        print("  ✓ Docker daemon is running", flush=True)
+        return True
+    except subprocess.TimeoutExpired:
+        print(f"Error: Docker daemon did not respond within {timeout}s.")
+        print("  Start Docker Desktop and retry.")
+        return False
+    except Exception as e:
+        print(f"Error: Failed to check Docker daemon: {e}")
+        return False
+
 def docker_login(account_id, region):
     """Login to AWS ECR using Docker."""
     ecr_registry = f"{account_id}.dkr.ecr.{region}.amazonaws.com"
-    
+
     try:
-        ecr_client = boto3.client("ecr", region_name=region)
-        token_response = ecr_client.get_authorization_token()
-        token = token_response['authorizationData'][0]['authorizationToken']
-        
-        # Decode base64 token
-        username, password = base64.b64decode(token).decode('utf-8').split(':')
-        
-        # Login to Docker
-        login_cmd = [
-            "docker", "login",
-            "--username", username,
-            "--password-stdin",
-            ecr_registry
-        ]
-        
-        process = subprocess.Popen(
-            login_cmd,
-            stdin=subprocess.PIPE,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            text=True
+        print(f"  Logging in to {ecr_registry}...", flush=True)
+        login_result = subprocess.run(
+            ["aws", "ecr", "get-login-password", "--region", region],
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=60,
         )
-        stdout, stderr = process.communicate(input=password)
-        
-        if process.returncode != 0:
-            print(f"Error: Docker login failed: {stderr}")
+        if login_result.returncode != 0:
+            print(f"Error: Failed to get ECR login password: {login_result.stderr.strip()}")
             return False
-        
+
+        docker_login_result = subprocess.run(
+            ["docker", "login", "--username", "AWS", "--password-stdin", ecr_registry],
+            input=login_result.stdout,
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=120,
+        )
+        if docker_login_result.returncode != 0:
+            err = docker_login_result.stderr.strip() or docker_login_result.stdout.strip()
+            print(f"Error: Docker login failed: {err}")
+            return False
+
+        login_msg = docker_login_result.stdout.strip() or docker_login_result.stderr.strip()
+        if login_msg:
+            print(f"  {login_msg}", flush=True)
+        print("  ✓ ECR login successful", flush=True)
         return True
-            
+
+    except subprocess.TimeoutExpired:
+        print("Error: Docker login timed out. Ensure Docker Desktop is running and responsive.")
+        return False
     except Exception as e:
         print(f"Error: Failed to login to ECR: {e}")
         return False
 
 def run_docker_command(command, description):
-    """Run Docker command and handle errors."""
-    print(f"===== {description} =====")
+    """Run Docker command with live output (plain BuildKit progress)."""
+    print(f"===== {description} =====", flush=True)
+    print(f"  $ {' '.join(command)}", flush=True)
+    env = {**os.environ, "DOCKER_BUILDKIT": "1", "BUILDKIT_PROGRESS": "plain"}
     try:
         result = subprocess.run(
             command,
-            check=True,
-            capture_output=False,
-            text=True
+            env=env,
+            check=False,
         )
+        if result.returncode != 0:
+            print(f"Error: {description} failed (exit {result.returncode})", flush=True)
+            return False
         return True
-    except subprocess.CalledProcessError as e:
-        print(f"Error: {description} failed: {e}")
-        return False
     except Exception as e:
-        print(f"Error: {description} failed: {e}")
+        print(f"Error: {description} failed: {e}", flush=True)
         return False
 
 def push_to_ecr():
@@ -776,17 +804,20 @@ def push_to_ecr():
             return False
         
         # Check/create ECR repository
-        print("===== Checking ECR Repository =====")
+        print("===== Checking ECR Repository =====", flush=True)
         ecr_client = boto3.client("ecr", region_name=aws_region)
         if not ensure_ecr_repository(ecr_client, ecr_repository, aws_region):
             return False
-        
-        # ECR Login
-        print("===== AWS ECR Login =====")
+
+        if not check_docker_daemon():
+            return False
+
+        print("===== AWS ECR Login =====", flush=True)
         if not docker_login(aws_account_id, aws_region):
             return False
         
         # Build Docker image
+        print("Build output streams below (this may take several minutes)...", flush=True)
         if not run_docker_command(
             ["docker", "build", "-t", f"{ecr_repository}:{image_tag}", "."],
             "Building Docker Image"
