@@ -24,12 +24,31 @@ logger = logging.getLogger("agent")
 
 # Monkey patch httpx.AsyncClient for SigV4 authentication
 original_init = httpx.AsyncClient.__init__
+
+def _sigv4_region_for_bedrock_agentcore_url(url: str) -> str:
+    """Resolve AWS region for SigV4 signing from a bedrock-agentcore URL."""
+    host = urlparse(url).netloc
+    parts = host.split(".")
+    try:
+        idx = parts.index("bedrock-agentcore")
+        if idx + 1 < len(parts) and parts[idx + 1] != "amazonaws":
+            return parts[idx + 1]
+    except ValueError:
+        pass
+    return utils.load_config().get("region", "us-west-2")
+
 def patched_init(self, *args, **kwargs):
     # Add SigV4 signing event hook if needed
     async def sign_request(request: httpx.Request) -> None:
         """Sign the request with AWS SigV4 including the body"""
-        # Only sign requests to bedrock-agentcore
-        if "bedrock-agentcore" not in str(request.url):
+        url_str = str(request.url)
+        # Only sign requests to bedrock-agentcore runtime endpoints in this region.
+        if "bedrock-agentcore" not in url_str:
+            return
+        # Gateway MCP uses per-connection AgentCoreSigV4Auth (often us-east-1).
+        if ".gateway.bedrock-agentcore." in url_str:
+            return
+        if request.headers.get("Authorization"):
             return
         
         # Get credentials
@@ -37,7 +56,7 @@ def patched_init(self, *args, **kwargs):
         credentials = boto_session.get_credentials().get_frozen_credentials()
         
         # Parse URL
-        parsed_url = urlparse(str(request.url))
+        parsed_url = urlparse(url_str)
         host = parsed_url.netloc
         
         # Generate timestamp
@@ -70,13 +89,13 @@ def patched_init(self, *args, **kwargs):
         # Create AWS request for signing
         aws_request = AWSRequest(
             method=request.method,
-            url=str(request.url),
+            url=url_str,
             headers=aws_headers,
             data=body
         )
         
         # Sign the request
-        region = utils.load_config().get("region", "us-west-2")
+        region = _sigv4_region_for_bedrock_agentcore_url(url_str)
         auth = BotocoreSigV4Auth(credentials, "bedrock-agentcore", region)
         auth.add_auth(aws_request)
         

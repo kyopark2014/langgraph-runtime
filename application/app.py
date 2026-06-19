@@ -118,7 +118,7 @@ with st.sidebar:
         # Change radio to checkbox
         mcp_options = load_capability_list("mcp.list")
         mcp_selections = {}
-        default_selections = config.get("default_mcp_servers") or ["tavily", "web_fetch"]
+        default_selections = config.get("default_mcp_servers") or ["web_fetch", "websearch"]
         default_selections = [name for name in default_selections if name in mcp_options]
 
         with st.expander("MCP 옵션 선택", expanded=True):

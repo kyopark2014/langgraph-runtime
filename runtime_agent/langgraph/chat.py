@@ -1197,6 +1197,8 @@ async def create_agent(mcp_servers: list, skill_list: list, history_mode: str="D
                     logger.info(f"mcp_tool of {tool.name} already in tools")
         except Exception as e:
             logger.error(f"Failed to load MCP server '{server_name}': {e}")
+            if getattr(e, "__cause__", None):
+                logger.error(f"  cause: {e.__cause__}")
             logger.info(f"Continuing with remaining MCP servers (tools loaded: {len(tools)})")
         
     tools.extend(skill.get_skill_tools())
