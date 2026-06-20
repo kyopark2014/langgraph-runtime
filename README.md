@@ -576,7 +576,7 @@ git clone https://github.com/kyopark2014/langgraph-runtime
 cd langgraph-runtime && python3 installer.py
 ```
 
-Agent Runtime 이미지 빌드 및 AgentCore 배포는 아래를 사용합니다.
+Agent Runtime만 빌드하여 배포할 때에는 아래를 이용합니다. 
 
 ```text
 cd runtime_agent/langgraph && python3 installer.py
