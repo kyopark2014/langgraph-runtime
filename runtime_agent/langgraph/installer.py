@@ -617,6 +617,10 @@ def check_aws_credentials():
         print(f"Error: Failed to verify AWS credentials: {e}")
         return False
 
+DOCKER_MIN_FREE_MB = 2048
+DOCKER_REQUIRED_FREE_MB = 1024
+
+
 def ensure_ecr_repository(ecr_client, repository_name, region):
     """Check if ECR repository exists, create if it doesn't."""
     try:
@@ -636,6 +640,114 @@ def ensure_ecr_repository(ecr_client, repository_name, region):
         else:
             print(f"Error: Failed to check repository: {e}")
             return False
+
+
+def _filesystem_free_mb(path: str) -> int:
+    try:
+        return shutil.disk_usage(path).free // (1024 * 1024)
+    except OSError:
+        return -1
+
+
+def _docker_data_root() -> str:
+    try:
+        result = subprocess.run(
+            ["docker", "info", "--format", "{{.DockerRootDir}}"],
+            capture_output=True,
+            text=True,
+            timeout=30,
+            check=False,
+        )
+        if result.returncode == 0 and result.stdout.strip():
+            return result.stdout.strip()
+    except Exception:
+        pass
+    return "/var/lib/docker"
+
+
+def _print_disk_usage(label: str, path: str) -> int:
+    free_mb = _filesystem_free_mb(path)
+    if free_mb >= 0:
+        print(f"  {label}: {free_mb} MB free ({path})", flush=True)
+    return free_mb
+
+
+def cleanup_docker_resources() -> None:
+    """Remove unused Docker data to reclaim disk space before build."""
+    print("===== Cleaning Up Docker Resources =====", flush=True)
+    for cmd, label in [
+        (["docker", "builder", "prune", "-af"], "BuildKit cache"),
+        (["docker", "image", "prune", "-af"], "Unused images"),
+        (["docker", "container", "prune", "-f"], "Stopped containers"),
+        (["docker", "volume", "prune", "-f"], "Unused volumes"),
+    ]:
+        try:
+            result = subprocess.run(cmd, capture_output=True, text=True, timeout=300, check=False)
+            if result.returncode == 0:
+                output = (result.stdout or result.stderr).strip().splitlines()
+                detail = output[-1] if output else "done"
+                print(f"  ✓ Pruned {label}: {detail}", flush=True)
+            else:
+                err = (result.stderr or result.stdout).strip()
+                print(f"  Warning: Failed to prune {label}: {err}", flush=True)
+        except Exception as e:
+            print(f"  Warning: Failed to prune {label}: {e}", flush=True)
+
+
+def ensure_docker_disk_space(min_free_mb: int = DOCKER_MIN_FREE_MB) -> bool:
+    """Ensure enough free disk space for Docker build; prune if needed."""
+    print("===== Checking Docker Disk Space =====", flush=True)
+    docker_root = _docker_data_root()
+    root_free = _print_disk_usage("Root filesystem", "/")
+    docker_free = _print_disk_usage("Docker data directory", docker_root)
+    free_mb = min(root_free, docker_free) if root_free >= 0 and docker_free >= 0 else max(root_free, docker_free)
+
+    if free_mb >= min_free_mb:
+        print(f"  ✓ Sufficient disk space ({free_mb} MB >= {min_free_mb} MB)", flush=True)
+        return True
+
+    print(
+        f"  Warning: Low disk space ({free_mb} MB free, need ~{min_free_mb} MB). "
+        "Attempting Docker cleanup...",
+        flush=True,
+    )
+    cleanup_docker_resources()
+
+    root_free = _print_disk_usage("Root filesystem after cleanup", "/")
+    docker_free = _print_disk_usage("Docker data directory after cleanup", docker_root)
+    free_mb = min(root_free, docker_free) if root_free >= 0 and docker_free >= 0 else max(root_free, docker_free)
+
+    if free_mb >= DOCKER_REQUIRED_FREE_MB:
+        print(f"  ✓ Disk space available after cleanup ({free_mb} MB)", flush=True)
+        return True
+
+    print("Error: Not enough disk space for Docker build.", flush=True)
+    print("  CloudShell and similar environments have limited storage.", flush=True)
+    print("  Manual cleanup options:", flush=True)
+    print("    docker system prune -af", flush=True)
+    print("    rm -rf ~/.cache/pip ~/.npm /tmp/*", flush=True)
+    print("  Or build elsewhere and rerun the root installer with --skip-docker-build.", flush=True)
+    return False
+
+
+def remove_local_docker_images(image_refs: list[str]) -> None:
+    """Delete local image tags after a successful push to free disk space."""
+    unique_refs = []
+    for ref in image_refs:
+        if ref and ref not in unique_refs:
+            unique_refs.append(ref)
+    if not unique_refs:
+        return
+
+    print("===== Removing Local Docker Images =====", flush=True)
+    subprocess.run(
+        ["docker", "rmi", "-f", *unique_refs],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    cleanup_docker_resources()
+
 
 def check_docker_daemon(timeout: int = 30) -> bool:
     """Verify Docker daemon is reachable before build/push."""
@@ -717,6 +829,12 @@ def run_docker_command(command, description):
         )
         if result.returncode != 0:
             print(f"Error: {description} failed (exit {result.returncode})", flush=True)
+            if command and command[0] == "docker" and "build" in command:
+                print(
+                    "  If the build log shows 'no space left on device', run "
+                    "'docker system prune -af' and retry.",
+                    flush=True,
+                )
             return False
         return True
     except Exception as e:
@@ -781,6 +899,9 @@ def push_to_ecr():
         if not check_docker_daemon():
             return False
 
+        if not ensure_docker_disk_space():
+            return False
+
         print("===== AWS ECR Login =====", flush=True)
         if not docker_login(aws_account_id, aws_region):
             return False
@@ -811,6 +932,8 @@ def push_to_ecr():
         print("===== Complete =====")
         print("Image has been successfully built and pushed to ECR.")
         print(f"Image URI: {ecr_uri}")
+
+        remove_local_docker_images([f"{ecr_repository}:{image_tag}", ecr_uri])
         
         # Store image tag in config for later use
         update_config('latest_image_tag', image_tag)
