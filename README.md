@@ -114,6 +114,141 @@ UI에서 MCP는 `application/mcp.list` 기준으로 `tavily`, `knowledge base`, 
 - AgentCore Gateway: API, Lambda를 비롯한 서비스들을 쉽게 Tool로 활용할 수 있습니다.
 - AgentCore Observability: 상용 환경에서 개발자가 agent의 동작을 trace, debug, monitor 할 수 있습니다.
 
+
+
+## Agent 구현
+
+AgentCore는 SSE 방식의 stream을 제공합니다. 
+
+### LangGraph Agent
+
+아래는 LangGraph로 구현한 ReAct agent입니다. 
+
+```python
+def buildChatAgentWithHistory(tools):
+    tool_node = ToolNode(tools)
+
+    workflow = StateGraph(State)
+
+    workflow.add_node("agent", call_model)
+    workflow.add_node("action", tool_node)
+    workflow.add_edge(START, "agent")
+    workflow.add_conditional_edges(
+        "agent",
+        should_continue,
+        {
+            "continue": "action",
+            "end": END,
+        },
+    )
+    workflow.add_edge("action", "agent")
+
+    return workflow.compile(
+        checkpointer=chat.checkpointer
+    )
+```
+
+
+[runtime_agent/langgraph/agent.py](./runtime_agent/langgraph/agent.py)와 같이 stream 방식으로 처리하면 agent가 좀 더 동적으로 동작하게 할 수 있습니다. 아래와 같이 MCP 서버의 정보로 json 파일을 만든 후에 MultiServerMCPClient으로 client를 설정하고 나서 agent를 생성합니다. 이후 stream을 이용해 출력할때 json 형태의 결과값을 stream으로 전달합니다. 
+
+```python
+from bedrock_agentcore.runtime import BedrockAgentCoreApp
+app = BedrockAgentCoreApp()
+
+@app.entrypoint
+async def agent_langgraph(payload):
+    mcp_json = mcp_config.load_selected_config(mcp_servers)
+    server_params = load_multiple_mcp_server_parameters(mcp_json)
+    client = MultiServerMCPClient(server_params)
+
+    app = buildChatAgentWithHistory(tools)
+    config = {
+        "recursion_limit": 50,
+        "configurable": {"thread_id": user_id},
+        "tools": tools
+    }    
+    inputs = {
+        "messages": [HumanMessage(content=query)]
+    }
+            
+    value = None
+    async for output in app.astream(inputs, config):
+        for key, value in output.items():
+            logger.info(f"--> key: {key}, value: {value}")
+
+            if "messages" in value:
+                for message in value["messages"]:
+                    if isinstance(message, AIMessage):
+                        yield({'data': message.content})
+                        tool_calls = message.tool_calls
+                        if tool_calls:
+                            for tool_call in tool_calls:
+                                tool_name = tool_call["name"]
+                                tool_content = tool_call["args"]
+                                toolUseId = tool_call["id"]
+                                yield({'tool': tool_name, 'input': tool_content, 'toolUseId': toolUseId})
+                    elif isinstance(message, ToolMessage):
+                        toolResult = message.content
+                        toolUseId = message.tool_call_id
+                        yield({'toolResult': toolResult, 'toolUseId': toolUseId})
+```
+
+### Client
+
+AgentCore로 agent_runtime_arn을 이용해 request에 대한 응답을 얻습니다. 이때 content-type이 "text/event-stream"인 경우에 prefix인 "data:"를 제거한 후에 json parser를 이용해 얻어진 값을 목적에 맞게 활용합니다.
+
+```python
+agent_core_client = boto3.client('bedrock-agentcore', region_name=bedrock_region)
+response = agent_core_client.invoke_agent_runtime(
+    agentRuntimeArn=agent_runtime_arn,
+    runtimeSessionId=runtime_session_id,
+    payload=payload,
+    qualifier="DEFAULT" # DEFAULT or LATEST
+)
+
+result = current = ""
+processed_data = set()  # Prevent duplicate data
+
+# stream response
+if "text/event-stream" in response.get("contentType", ""):
+    for line in response["response"].iter_lines(chunk_size=10):
+        line = line.decode("utf-8")        
+        if line.startswith('data: '):
+            data = line[6:].strip()  # Remove "data:" prefix and whitespace
+            if data:  # Only process non-empty data
+                # Check for duplicate data
+                if data in processed_data:
+                    continue
+                processed_data.add(data)
+                
+                data_json = json.loads(data)
+                if 'data' in data_json:
+                    text = data_json['data']
+                    logger.info(f"[data] {text}")
+                    current += text
+                    containers['result'].markdown(current)
+                elif 'result' in data_json:
+                    result = data_json['result']
+                elif 'tool' in data_json:
+                    tool = data_json['tool']
+                    input = data_json['input']
+                    toolUseId = data_json['toolUseId']
+                    if toolUseId not in tool_info_list: # new tool info
+                        tool_info_list[toolUseId] = index                                        
+                        add_notification(containers, f"Tool: {tool}, Input: {input}")
+                    else: # overwrite tool info
+                        containers['notification'][tool_info_list[toolUseId]].info(f"Tool: {tool}, Input: {input}")                    
+                elif 'toolResult' in data_json:
+                    toolResult = data_json['toolResult']
+                    toolUseId = data_json['toolUseId']
+                    if toolUseId not in tool_result_list:  # new tool result
+                        tool_result_list[toolUseId] = index
+                        add_notification(containers, f"Tool Result: {toolResult}")
+                    else: # overwrite tool result
+                        containers['notification'][tool_result_list[toolUseId]].info(f"Tool Result: {toolResult}")
+```
+
+
 ## Runtime Agent
 
 LangGraph agent는 [runtime_agent/langgraph/](./runtime_agent/langgraph/)에 구현되어 있으며, AgentCore Runtime 컨테이너에서 `agent.py`의 `BedrockAgentCoreApp` 엔트리포인트로 실행됩니다.
@@ -375,178 +510,6 @@ Knowledge Base에서 문서를 활용하기 위해서는 S3에 문서 등록 및
 
 <img width="1533" height="287" alt="noname" src="https://github.com/user-attachments/assets/2edd3b6b-dbce-4784-b640-139fa84cc223" />
 
-
-## Agent 구현
-
-AgentCore는 SSE 방식의 stream을 제공합니다. 
-
-### LangGraph
-
-#### LangGraph Agent
-
-아래는 LangGraph로 구현한 ReAct agent입니다. 
-
-```python
-def buildChatAgentWithHistory(tools):
-    tool_node = ToolNode(tools)
-
-    workflow = StateGraph(State)
-
-    workflow.add_node("agent", call_model)
-    workflow.add_node("action", tool_node)
-    workflow.add_edge(START, "agent")
-    workflow.add_conditional_edges(
-        "agent",
-        should_continue,
-        {
-            "continue": "action",
-            "end": END,
-        },
-    )
-    workflow.add_edge("action", "agent")
-
-    return workflow.compile(
-        checkpointer=chat.checkpointer,
-        store=chat.memorystore
-    )
-```
-
-
-[runtime_agent/langgraph/agent.py](./runtime_agent/langgraph/agent.py)와 같이 stream 방식으로 처리하면 agent가 좀 더 동적으로 동작하게 할 수 있습니다. 아래와 같이 MCP 서버의 정보로 json 파일을 만든 후에 MultiServerMCPClient으로 client를 설정하고 나서 agent를 생성합니다. 이후 stream을 이용해 출력할때 json 형태의 결과값을 stream으로 전달합니다. 
-
-```python
-from bedrock_agentcore.runtime import BedrockAgentCoreApp
-app = BedrockAgentCoreApp()
-
-@app.entrypoint
-async def agent_langgraph(payload):
-    mcp_json = mcp_config.load_selected_config(mcp_servers)
-    server_params = load_multiple_mcp_server_parameters(mcp_json)
-    client = MultiServerMCPClient(server_params)
-
-    app = buildChatAgentWithHistory(tools)
-    config = {
-        "recursion_limit": 50,
-        "configurable": {"thread_id": user_id},
-        "tools": tools
-    }    
-    inputs = {
-        "messages": [HumanMessage(content=query)]
-    }
-            
-    value = None
-    async for output in app.astream(inputs, config):
-        for key, value in output.items():
-            logger.info(f"--> key: {key}, value: {value}")
-
-            if "messages" in value:
-                for message in value["messages"]:
-                    if isinstance(message, AIMessage):
-                        yield({'data': message.content})
-                        tool_calls = message.tool_calls
-                        if tool_calls:
-                            for tool_call in tool_calls:
-                                tool_name = tool_call["name"]
-                                tool_content = tool_call["args"]
-                                toolUseId = tool_call["id"]
-                                yield({'tool': tool_name, 'input': tool_content, 'toolUseId': toolUseId})
-                    elif isinstance(message, ToolMessage):
-                        toolResult = message.content
-                        toolUseId = message.tool_call_id
-                        yield({'toolResult': toolResult, 'toolUseId': toolUseId})
-```
-
-#### Client
-
-AgentCore로 agent_runtime_arn을 이용해 request에 대한 응답을 얻습니다. 이때 content-type이 "text/event-stream"인 경우에 prefix인 "data:"를 제거한 후에 json parser를 이용해 얻어진 값을 목적에 맞게 활용합니다.
-
-```python
-agent_core_client = boto3.client('bedrock-agentcore', region_name=bedrock_region)
-response = agent_core_client.invoke_agent_runtime(
-    agentRuntimeArn=agent_runtime_arn,
-    runtimeSessionId=runtime_session_id,
-    payload=payload,
-    qualifier="DEFAULT" # DEFAULT or LATEST
-)
-
-result = current = ""
-processed_data = set()  # Prevent duplicate data
-
-# stream response
-if "text/event-stream" in response.get("contentType", ""):
-    for line in response["response"].iter_lines(chunk_size=10):
-        line = line.decode("utf-8")        
-        if line.startswith('data: '):
-            data = line[6:].strip()  # Remove "data:" prefix and whitespace
-            if data:  # Only process non-empty data
-                # Check for duplicate data
-                if data in processed_data:
-                    continue
-                processed_data.add(data)
-                
-                data_json = json.loads(data)
-                if 'data' in data_json:
-                    text = data_json['data']
-                    logger.info(f"[data] {text}")
-                    current += text
-                    containers['result'].markdown(current)
-                elif 'result' in data_json:
-                    result = data_json['result']
-                elif 'tool' in data_json:
-                    tool = data_json['tool']
-                    input = data_json['input']
-                    toolUseId = data_json['toolUseId']
-                    if toolUseId not in tool_info_list: # new tool info
-                        tool_info_list[toolUseId] = index                                        
-                        add_notification(containers, f"Tool: {tool}, Input: {input}")
-                    else: # overwrite tool info
-                        containers['notification'][tool_info_list[toolUseId]].info(f"Tool: {tool}, Input: {input}")                    
-                elif 'toolResult' in data_json:
-                    toolResult = data_json['toolResult']
-                    toolUseId = data_json['toolUseId']
-                    if toolUseId not in tool_result_list:  # new tool result
-                        tool_result_list[toolUseId] = index
-                        add_notification(containers, f"Tool Result: {toolResult}")
-                    else: # overwrite tool result
-                        containers['notification'][tool_result_list[toolUseId]].info(f"Tool Result: {toolResult}")
-```
-
-
-## 배포하기
-
-
-아래와 같이 git source를 가져옵니다.
-
-```python
-git clone https://github.com/kyopark2014/langgraph-runtime
-```
-
-아래와 같이 루트 [installer.py](./installer.py)를 이용해 AWS 인프라 설치를 시작합니다.
-
-```text
-cd langgraph-runtime && python3 installer.py
-```
-
-Agent Runtime 이미지 빌드 및 AgentCore 배포는 아래를 사용합니다.
-
-```text
-cd runtime_agent/langgraph && python3 installer.py
-```
-
-API 구현에 필요한 credential은 secret으로 관리합니다. 따라서 설치시 필요한 credential 입력이 필요한데 아래와 같은 방식을 활용하여 미리 credential을 준비합니다. 
-
-- 일반 인터넷 검색: [Tavily Search](https://app.tavily.com/sign-in)에 접속하여 가입 후 API Key를 발급합니다. 이것은 tvly-로 시작합니다.  
-
-설치가 완료되면 CloudFront로 접속하여 동작을 확인합니다. 
-
-접속한 후 아래와 같이 Agent를 선택한 후에 적절한 MCP tool을 선택하여 원하는 작업을 수행합니다.
-
-인프라가 더이상 필요없을 때에는 루트 [uninstaller.py](./uninstaller.py)를 이용해 제거합니다.
-
-```text
-python uninstaller.py
-```
-
 ### 세션 관리
 
 AgentCore Runtime에서 대화 history를 유지하려면 **managed session storage**(`filesystemConfigurations.sessionStorage`)와 **동일한 `runtimeSessionId`**, 그리고 LangGraph **checkpointer**(SQLite)가 함께 동작해야 합니다. 상세 구현은 위 [Session Storage](#session-storage) 절을 참조합니다.
@@ -607,6 +570,43 @@ AgentCore Runtime에서 대화 history를 유지하려면 **managed session stor
 - [File system configurations for AgentCore Runtime](https://docs.aws.amazon.com/bedrock-agentcore/latest/devguide/runtime-filesystem-configurations.html)
 - [Configure lifecycle settings](https://docs.aws.amazon.com/bedrock-agentcore/latest/devguide/runtime-lifecycle-settings.html)
 - [AgentCore quotas (session storage limits)](https://docs.aws.amazon.com/bedrock-agentcore/latest/devguide/bedrock-agentcore-limits.html)
+
+
+## 배포하기
+
+
+아래와 같이 git source를 가져옵니다.
+
+```python
+git clone https://github.com/kyopark2014/langgraph-runtime
+```
+
+아래와 같이 루트 [installer.py](./installer.py)를 이용해 AWS 인프라 설치를 시작합니다.
+
+```text
+cd langgraph-runtime && python3 installer.py
+```
+
+Agent Runtime 이미지 빌드 및 AgentCore 배포는 아래를 사용합니다.
+
+```text
+cd runtime_agent/langgraph && python3 installer.py
+```
+
+API 구현에 필요한 credential은 secret으로 관리합니다. 따라서 설치시 필요한 credential 입력이 필요한데 아래와 같은 방식을 활용하여 미리 credential을 준비합니다. 
+
+- 일반 인터넷 검색: [Tavily Search](https://app.tavily.com/sign-in)에 접속하여 가입 후 API Key를 발급합니다. 이것은 tvly-로 시작합니다.  
+
+설치가 완료되면 CloudFront로 접속하여 동작을 확인합니다. 
+
+접속한 후 아래와 같이 Agent를 선택한 후에 적절한 MCP tool을 선택하여 원하는 작업을 수행합니다.
+
+인프라가 더이상 필요없을 때에는 루트 [uninstaller.py](./uninstaller.py)를 이용해 제거합니다.
+
+```text
+python uninstaller.py
+```
+
 
 ### Local에서 실행하기
 
