@@ -439,18 +439,7 @@ return workflow.compile(
 )
 ```
 
-대화는 `thread_id`로 구분됩니다. MCP·Skill 구성이 바뀌면 scope 해시가 달라져 별도 thread로 취급됩니다.
 
-```python
-thread_id = memory_scope if history_mode == "Enable" else user_id
-config = {
-    "configurable": {
-        "thread_id": thread_id,
-        "tools": tools,
-        "system_prompt": system_prompt,
-    },
-}
-```
 
 ### 클라이언트 runtimeSessionId
 
