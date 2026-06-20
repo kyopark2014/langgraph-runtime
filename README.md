@@ -240,7 +240,7 @@ sequenceDiagram
 
 ### IAM 인증
 
-Agent Runtime 배포 시 IAM 인증을 사용합니다. [create_agent_runtime](https://boto3.amazonaws.com/v1/documentation/api/latest/reference/services/bedrock-agentcore-control/client/create_agent_runtime.html)에서 authorizerConfiguration을 포함하지 않은 경우에 IAM으로 인증하게 됩니다. Runtime 생성시 client는 bedrock-agentcore-control을 사용하고 Agent 이미지에 대한 ECR 경로를 가지고 있어야 합니다. 
+LangGraph agent에 대한 이미지를 [runtime_agent/langgraph/Dockerfile](./runtime_agent/langgraph/Dockerfile)을 이용해 빌드후 ECR에 배포합니다. 또한, Agent Runtime 배포 시 IAM 인증을 사용합니다. [create_agent_runtime](https://boto3.amazonaws.com/v1/documentation/api/latest/reference/services/bedrock-agentcore-control/client/create_agent_runtime.html)에서 authorizerConfiguration을 포함하지 않은 경우에 IAM으로 인증하게 됩니다. Runtime 생성시 client는 bedrock-agentcore-control을 사용하고 Agent 이미지에 대한 ECR 경로를 가지고 있어야 합니다. 
 
 Agent에서 외부 AgentCore endpoint로 요청을 보낼때에는 아래와 같이 IAM 인증을 수행하기 위하여 request에 X-Amz-Security-Token을 포함합니다. 이를 위해 httpx의 event hook을 이용해 아래와 같이 구현할 수 있습니다. 상세코드는 [runtime_agent/langgraph/agent.py](./runtime_agent/langgraph/agent.py)을 참조합니다.
 
@@ -364,65 +364,6 @@ async def agent_langgraph(payload):
                     final_output = {"messages": [value], "image_url": []}
 ```
 
-
-
-### AgentCore Runtime으로 Agent 배포하기
-
-LangGraph agent에 대한 이미지를 [runtime_agent/langgraph/Dockerfile](./runtime_agent/langgraph/Dockerfile)을 이용해 빌드후 ECR에 배포합니다. 
-
-
-[runtime_agent/langgraph/installer.py](./runtime_agent/langgraph/installer.py)에서는 AgentCore에 처음으로 배포하는지 확인하여 아래와 같이 runtime을 생성합니다. 여기서 networkMode는 PUBLIC/VPC를 선택할 수 있어서 필요시 agent를 특정 VPC 접속으로 제한할 수 있고, Security Group을 이용하여 사내로 접속을 제한할 수 있습니다. 또한, protocolConfiguration은 HTTP, MCP, A2A를 선택하여 필요한 용도에 맞게 사용할 수 있습니다. 인증은 기본이 IAM이며, 필요시 authorizerConfiguration을 이용해 JWT를 사용할 수 있습니다.
-
-```python
-response = client.create_agent_runtime(
-    agentRuntimeName=runtime_name,
-    agentRuntimeArtifact={
-        'containerConfiguration': {
-            'containerUri': f"{accountId}.dkr.ecr.{aws_region}.amazonaws.com/{repositoryName}:{imageTags}"
-        }
-    },
-    networkConfiguration={"networkMode":"PUBLIC"},
-    protocolConfiguration={"serverProtocol":"HTTP"}
-    roleArn=agent_runtime_role
-)
-agentRuntimeArn = response['agentRuntimeArn']
-```
-
-Runtime agent를 생성하기 전에 기존 runtime이 있는지는 아래와 같이 [list_agent_runtimes](https://boto3.amazonaws.com/v1/documentation/api/latest/reference/services/bedrock-agentcore-control/client/list_agent_runtimes.html)을 이용해 확인할 수 있습니다.
-
-```python
-client = boto3.client('bedrock-agentcore-control', region_name=aws_region)
-response = client.list_agent_runtimes()
-
-isExist = False
-agentRuntimeId = None
-agentRuntimes = response['agentRuntimes']
-targetAgentRuntime = repositoryName
-if len(agentRuntimes) > 0:
-    for agentRuntime in agentRuntimes:
-        agentRuntimeName = agentRuntime['agentRuntimeName']
-        if agentRuntimeName == targetAgentRuntime:
-            agentRuntimeId = agentRuntime['agentRuntimeId']
-            isExist = True        
-            break
-```
-
-이미 runtime이 있다면 아래와 같이 [update_agent_runtime](https://boto3.amazonaws.com/v1/documentation/api/latest/reference/services/bedrock-agentcore-control/client/update_agent_runtime.html)을 이용해 업데이트 합니다.
-
-```python
-response = client.update_agent_runtime(
-    agentRuntimeId=agentRuntimeId,
-    description="Update agent runtime",
-    agentRuntimeArtifact={
-        'containerConfiguration': {
-            'containerUri': f"{accountId}.dkr.ecr.{aws_region}.amazonaws.com/{targetAgentRuntime}:{imageTags}"
-        }
-    },
-    roleArn=agent_runtime_role,
-    networkConfiguration={"networkMode":"PUBLIC"},
-    protocolConfiguration={"serverProtocol":"HTTP"}
-)
-```
 
 
 
