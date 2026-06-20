@@ -3010,6 +3010,55 @@ def create_agentcore_websearch_gateway_role() -> str:
     return role_arn
 
 
+def _find_existing_agentcore_websearch_gateway() -> Optional[Dict[str, str]]:
+    """Return gateway info when gateway-websearch and its websearch target already exist."""
+    gateway_id = None
+    for gateway in _list_all_agentcore_gateways():
+        if gateway.get("name") == AGENTCORE_WEBSEARCH_GATEWAY_NAME:
+            gateway_id = gateway["gatewayId"]
+            break
+
+    if not gateway_id:
+        return None
+
+    target_id = None
+    for target in _list_all_agentcore_gateway_targets(gateway_id):
+        if target.get("name") == AGENTCORE_WEBSEARCH_TARGET_NAME:
+            target_id = target["targetId"]
+            break
+
+    if not target_id:
+        return None
+
+    gateway = agentcore_control_client.get_gateway(gatewayIdentifier=gateway_id)
+    status = gateway.get("status", "")
+    if status != "READY":
+        if status in ("FAILED", "DELETING", "DELETE_UNSUCCESSFUL", "UPDATE_UNSUCCESSFUL"):
+            logger.warning(
+                f"  Existing AgentCore websearch gateway is not usable: "
+                f"{gateway_id} ({status})"
+            )
+            return None
+        gateway = wait_for_agentcore_gateway_ready(gateway_id)
+
+    return {
+        "gateway_id": gateway_id,
+        "gateway_name": AGENTCORE_WEBSEARCH_GATEWAY_NAME,
+        "gateway_region": AGENTCORE_GATEWAY_REGION,
+        "gateway_url": gateway.get("gatewayUrl", "").rstrip("/"),
+        "gateway_arn": gateway.get("gatewayArn", ""),
+        "gateway_service_role_arn": gateway.get("roleArn", ""),
+        "target_id": target_id,
+    }
+
+
+def _write_websearch_gateway_config(gateway_info: Dict[str, str]) -> bool:
+    """Persist AgentCore websearch gateway settings to application/config.json."""
+    config_data: Dict[str, str] = {}
+    _apply_websearch_gateway_config(config_data, gateway_info)
+    return write_application_config(config_data)
+
+
 def _ensure_websearch_gateway_target(gateway_id: str) -> str:
     """Create the managed web-search connector target if it does not exist."""
     for target in _list_all_agentcore_gateway_targets(gateway_id):
@@ -5020,10 +5069,29 @@ def main():
         knowledge_base_role_arn = create_knowledge_base_role()
         agent_role_arn = create_agent_role()
         ecs_roles = create_ecs_roles(knowledge_base_role_arn)
-        agentcore_websearch_gateway_role_arn = create_agentcore_websearch_gateway_role()
-        agentcore_websearch_gateway_info = get_or_create_agentcore_websearch_gateway(
-            agentcore_websearch_gateway_role_arn
-        )
+        agentcore_websearch_gateway_info = _find_existing_agentcore_websearch_gateway()
+        if agentcore_websearch_gateway_info:
+            logger.info(
+                "[2/10] Found existing AgentCore Web Search gateway with websearch target"
+            )
+            logger.warning(
+                f"  Reusing AgentCore gateway: "
+                f"{agentcore_websearch_gateway_info['gateway_name']} "
+                f"({agentcore_websearch_gateway_info['gateway_id']})"
+            )
+            logger.warning(
+                f"  Reusing websearch target: "
+                f"{agentcore_websearch_gateway_info['target_id']}"
+            )
+            if _write_websearch_gateway_config(agentcore_websearch_gateway_info):
+                logger.info(
+                    f"✓ Updated {_application_config_path()} with existing websearch gateway info"
+                )
+        else:
+            agentcore_websearch_gateway_role_arn = create_agentcore_websearch_gateway_role()
+            agentcore_websearch_gateway_info = get_or_create_agentcore_websearch_gateway(
+                agentcore_websearch_gateway_role_arn
+            )
         logger.info(f"IAM roles created...")
         
         # 3. Create S3 Vectors store
