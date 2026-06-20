@@ -3677,6 +3677,23 @@ DOCKER_MIN_FREE_MB = 2048
 DOCKER_REQUIRED_FREE_MB = 1024
 
 
+def _host_is_arm64() -> bool:
+    return os.uname().machine.lower() in ("aarch64", "arm64")
+
+
+def _docker_build_platform() -> str:
+    """Return native Docker platform for the current host (no cross-build/QEMU)."""
+    return "linux/arm64" if _host_is_arm64() else "linux/amd64"
+
+
+def _ecs_runtime_platform() -> Dict[str, str]:
+    """Return ECS Fargate runtimePlatform matching the native build architecture."""
+    return {
+        "cpuArchitecture": "ARM64" if _host_is_arm64() else "X86_64",
+        "operatingSystemFamily": "LINUX",
+    }
+
+
 def _docker_data_root() -> str:
     try:
         result = subprocess.run(
@@ -3790,10 +3807,13 @@ def build_and_push_docker_image(
 
     _ensure_docker_disk_space()
 
+    docker_platform = _docker_build_platform()
+    logger.info(f"  Host architecture: {os.uname().machine}")
+    logger.info(f"  Docker platform: {docker_platform} (native build, no QEMU)")
     logger.info(f"  Starting Docker build: {image_uri}")
     logger.info("  Build output streams below (this may take several minutes)...")
     _run_command_streaming(
-        ["docker", "build", "--platform", "linux/amd64", "-t", image_uri, "."],
+        ["docker", "build", "--platform", docker_platform, "-t", image_uri, "."],
         cwd=project_root,
     )
     logger.info("  ✓ Docker build completed")
@@ -4022,6 +4042,7 @@ def deploy_ecs_service(
         requiresCompatibilities=["FARGATE"],
         cpu="1024",
         memory="2048",
+        runtimePlatform=_ecs_runtime_platform(),
         executionRoleArn=ecs_roles["execution_role_arn"],
         taskRoleArn=ecs_roles["task_role_arn"],
         containerDefinitions=[
