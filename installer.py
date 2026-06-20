@@ -3682,16 +3682,27 @@ def _host_is_arm64() -> bool:
 
 
 def _docker_build_platform() -> str:
-    """Return native Docker platform for the current host (no cross-build/QEMU)."""
-    return "linux/arm64" if _host_is_arm64() else "linux/amd64"
+    """Return Docker platform for ECS/AgentCore (linux/arm64, native build only)."""
+    return "linux/arm64"
 
 
 def _ecs_runtime_platform() -> Dict[str, str]:
-    """Return ECS Fargate runtimePlatform matching the native build architecture."""
+    """Return ECS Fargate runtimePlatform (ARM64, aligned with AgentCore runtime)."""
     return {
-        "cpuArchitecture": "ARM64" if _host_is_arm64() else "X86_64",
+        "cpuArchitecture": "ARM64",
         "operatingSystemFamily": "LINUX",
     }
+
+
+def _require_arm64_build_host(context: str) -> None:
+    """Ensure Docker images are built natively on ARM64 (same as AgentCore runtime)."""
+    if _host_is_arm64():
+        return
+    raise RuntimeError(
+        f"{context} requires linux/arm64 images.\n"
+        f"  Current host architecture: {os.uname().machine}\n"
+        "  Build on an ARM64 EC2 instance (e.g. t4g, m7g) and retry."
+    )
 
 
 def _docker_data_root() -> str:
@@ -3777,6 +3788,8 @@ def build_and_push_docker_image(
     if shutil.which("docker") is None:
         raise RuntimeError("Docker CLI is required to build and push the container image")
 
+    _require_arm64_build_host("ECS container image build")
+
     if not image_tag:
         image_tag = generate_image_build_tag()
 
@@ -3809,7 +3822,7 @@ def build_and_push_docker_image(
 
     docker_platform = _docker_build_platform()
     logger.info(f"  Host architecture: {os.uname().machine}")
-    logger.info(f"  Docker platform: {docker_platform} (native build, no QEMU)")
+    logger.info(f"  Docker platform: {docker_platform} (native ARM64 build, no QEMU)")
     logger.info(f"  Starting Docker build: {image_uri}")
     logger.info("  Build output streams below (this may take several minutes)...")
     _run_command_streaming(
