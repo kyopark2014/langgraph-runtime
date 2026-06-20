@@ -124,7 +124,7 @@ def _runtime_session_id() -> str | None:
 
 
 def get_checkpoint_db_path() -> str:
-    """Use local /tmp for SQLite; AgentCore session storage can break file locking."""
+    """Working SQLite path on local disk (avoids session-storage locking during runtime)."""
     session_id = _runtime_session_id()
     if session_id:
         local_dir = os.path.join("/tmp", "langgraph-checkpoints", session_id)
@@ -133,16 +133,60 @@ def get_checkpoint_db_path() -> str:
     return LEGACY_CHECKPOINT_DB
 
 
-def _setup_lock_file(checkpoint_db: str) -> str:
-    return checkpoint_db + ".setup.lock"
+def get_persistent_checkpoint_db_path() -> str:
+    """Durable checkpoint path on AgentCore session storage (/mnt/workspace)."""
+    return LEGACY_CHECKPOINT_DB
 
 
-def _maybe_import_legacy_checkpoint(checkpoint_db: str) -> None:
-    if checkpoint_db == LEGACY_CHECKPOINT_DB or _checkpoint_db_ready(checkpoint_db):
+def _restore_from_session_storage(working_db: str) -> None:
+    """Copy durable checkpoint from session storage into the local working DB."""
+    persistent = get_persistent_checkpoint_db_path()
+    if working_db == persistent or not _checkpoint_db_ready(persistent):
         return
-    if os.path.isfile(LEGACY_CHECKPOINT_DB) and os.path.getsize(LEGACY_CHECKPOINT_DB) > 0:
-        shutil.copy2(LEGACY_CHECKPOINT_DB, checkpoint_db)
-        logger.info(f"Seeded checkpoint DB from session storage: {checkpoint_db}")
+
+    if _checkpoint_db_ready(working_db):
+        if os.path.getmtime(persistent) <= os.path.getmtime(working_db):
+            return
+
+    os.makedirs(os.path.dirname(working_db), exist_ok=True)
+    shutil.copy2(persistent, working_db)
+    for suffix in ("-wal", "-shm"):
+        src = persistent + suffix
+        if os.path.isfile(src):
+            shutil.copy2(src, working_db + suffix)
+    logger.info(f"Restored checkpoint DB from session storage: {persistent} -> {working_db}")
+
+
+async def persist_checkpoint_to_session_storage() -> None:
+    """Flush working checkpoint to session storage so history survives microVM stop/resume."""
+    if _sqlite_checkpointer is None:
+        return
+
+    working_db = get_checkpoint_db_path()
+    persistent = get_persistent_checkpoint_db_path()
+    if working_db == persistent or not _checkpoint_db_ready(working_db):
+        return
+
+    os.makedirs(SESSION_STORAGE_DIR, exist_ok=True)
+
+    try:
+        await _sqlite_checkpointer.conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+        await _sqlite_checkpointer.conn.commit()
+
+        def _copy_checkpoint_files():
+            shutil.copy2(working_db, persistent)
+            for suffix in ("-wal", "-shm"):
+                src = working_db + suffix
+                dst = persistent + suffix
+                if os.path.isfile(src):
+                    shutil.copy2(src, dst)
+                elif os.path.isfile(dst):
+                    os.remove(dst)
+
+        await asyncio.to_thread(_copy_checkpoint_files)
+        logger.info(f"Checkpoint persisted to session storage: {persistent}")
+    except Exception as exc:
+        logger.warning(f"Failed to persist checkpoint to session storage: {exc}")
 
 
 def _is_sqlite_locked_error(exc: BaseException) -> bool:
@@ -245,7 +289,7 @@ async def ensure_checkpointer():
         _active_checkpoint_session = session_id
 
         try:
-            _maybe_import_legacy_checkpoint(checkpoint_db)
+            _restore_from_session_storage(checkpoint_db)
             if _checkpoint_db_ready(checkpoint_db):
                 _sqlite_checkpointer = await _open_existing_sqlite_checkpointer(checkpoint_db)
                 logger.info(f"SQLite checkpointer opened (existing): {checkpoint_db}")

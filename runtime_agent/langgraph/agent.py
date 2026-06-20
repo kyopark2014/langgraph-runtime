@@ -156,151 +156,154 @@ async def agent_langgraph(payload):
     history_mode = payload.get("history_mode", "Disable")
     logger.info(f"history_mode: {history_mode}")
 
-    if auth_type == "iam":
-        httpx.AsyncClient.__init__ = patched_init
-        logger.info("Applied SigV4 monkey patch")
-
     try:
-        app, config = await chat.create_agent(mcp_servers, skill_list, history_mode)
-    except Exception as e:
-        logger.error(f"Failed to create agent: {traceback.format_exc()}")
-        yield {
-            "result": {
-                "messages": [{"role": "assistant", "content": f"에이전트 초기화 오류: {e}"}],
-                "image_url": [],
+        if auth_type == "iam":
+            httpx.AsyncClient.__init__ = patched_init
+            logger.info("Applied SigV4 monkey patch")
+
+        try:
+            app, config = await chat.create_agent(mcp_servers, skill_list, history_mode)
+        except Exception as e:
+            logger.error(f"Failed to create agent: {traceback.format_exc()}")
+            yield {
+                "result": {
+                    "messages": [{"role": "assistant", "content": f"에이전트 초기화 오류: {e}"}],
+                    "image_url": [],
+                }
             }
+            return
+        if app is None:
+            yield {"result": {"messages": [{"role": "assistant", "content": "사용 가능한 도구가 없습니다."}], "image_url": []}}
+            return
+        
+        inputs = {
+            "messages": [HumanMessage(content=query)]
         }
-        return
-    if app is None:
-        yield {"result": {"messages": [{"role": "assistant", "content": "사용 가능한 도구가 없습니다."}], "image_url": []}}
-        return
-    
-    inputs = {
-        "messages": [HumanMessage(content=query)]
-    }
 
-    result_text = ""
-    tool_used = False
-    tool_input_list = {}
-    yielded_tool_ids = set()
+        result_text = ""
+        tool_used = False
+        tool_input_list = {}
+        yielded_tool_ids = set()
 
-    # call_model이 chain.astream을 쓰므로 LLM 토큰/청크가 그래프로 전달됨 (langgraph_agent.call_model)
-    async for stream in app.astream(inputs, config, stream_mode="messages"):
-        chunk = stream[0] if isinstance(stream, (list, tuple)) and stream else stream
+        # call_model이 chain.astream을 쓰므로 LLM 토큰/청크가 그래프로 전달됨 (langgraph_agent.call_model)
+        async for stream in app.astream(inputs, config, stream_mode="messages"):
+            chunk = stream[0] if isinstance(stream, (list, tuple)) and stream else stream
 
-        if isinstance(chunk, AIMessageChunk):
-            content = chunk.content
-            if isinstance(content, str) and content:
-                if tool_used:
-                    result_text = content
-                    tool_used = False
-                else:
-                    result_text += content
-                yield {"data": content}
-            elif isinstance(content, list):
-                for item in content:
-                    if not isinstance(item, dict):
-                        continue
-                    if item.get("type") == "text":
-                        text_part = item.get("text", "")
-                        if text_part:
-                            if tool_used:
-                                result_text = text_part
-                                tool_used = False
-                            else:
-                                result_text += text_part
-                            yield {"data": text_part}
-                    elif item.get("type") == "tool_use":
-                        tool_use_id = item.get("id", "")
-                        tool_name = item.get("name", "")
-                        if tool_use_id and tool_name:
-                            if tool_use_id not in tool_input_list:
-                                tool_input_list[tool_use_id] = ""
-                        if "partial_json" in item:
-                            pj = item.get("partial_json", "") or ""
-                            if tool_use_id:
-                                tool_input_list[tool_use_id] = tool_input_list.get(tool_use_id, "") + pj
-                            args_raw = tool_input_list.get(tool_use_id, "")
-                            if tool_use_id and args_raw:
-                                try:
-                                    args_obj = json.loads(args_raw)
-                                    if tool_use_id not in yielded_tool_ids:
-                                        yielded_tool_ids.add(tool_use_id)
-                                        logger.info(
-                                            f"tool_name: {tool_name}, content: {args_obj}, toolUseId: {tool_use_id}"
-                                        )
-                                        yield {
-                                            "tool": tool_name,
-                                            "input": args_obj,
-                                            "toolUseId": tool_use_id,
-                                        }
-                                except json.JSONDecodeError:
-                                    pass
-            # 완성된 tool_calls가 청크에 붙은 경우 (비스트리밍/일부 경로)
-            if getattr(chunk, "tool_calls", None):
-                for tc in chunk.tool_calls:
-                    if isinstance(tc, dict):
-                        tid, name, args = (
-                            tc.get("id", ""),
-                            tc.get("name", ""),
-                            tc.get("args", {}),
-                        )
+            if isinstance(chunk, AIMessageChunk):
+                content = chunk.content
+                if isinstance(content, str) and content:
+                    if tool_used:
+                        result_text = content
+                        tool_used = False
                     else:
-                        tid = getattr(tc, "id", "") or ""
-                        name = getattr(tc, "name", "") or ""
-                        args = getattr(tc, "args", {}) or {}
-                    if tid and tid not in yielded_tool_ids:
-                        yielded_tool_ids.add(tid)
-                        yield {"tool": name, "input": args, "toolUseId": tid}
+                        result_text += content
+                    yield {"data": content}
+                elif isinstance(content, list):
+                    for item in content:
+                        if not isinstance(item, dict):
+                            continue
+                        if item.get("type") == "text":
+                            text_part = item.get("text", "")
+                            if text_part:
+                                if tool_used:
+                                    result_text = text_part
+                                    tool_used = False
+                                else:
+                                    result_text += text_part
+                                yield {"data": text_part}
+                        elif item.get("type") == "tool_use":
+                            tool_use_id = item.get("id", "")
+                            tool_name = item.get("name", "")
+                            if tool_use_id and tool_name:
+                                if tool_use_id not in tool_input_list:
+                                    tool_input_list[tool_use_id] = ""
+                            if "partial_json" in item:
+                                pj = item.get("partial_json", "") or ""
+                                if tool_use_id:
+                                    tool_input_list[tool_use_id] = tool_input_list.get(tool_use_id, "") + pj
+                                args_raw = tool_input_list.get(tool_use_id, "")
+                                if tool_use_id and args_raw:
+                                    try:
+                                        args_obj = json.loads(args_raw)
+                                        if tool_use_id not in yielded_tool_ids:
+                                            yielded_tool_ids.add(tool_use_id)
+                                            logger.info(
+                                                f"tool_name: {tool_name}, content: {args_obj}, toolUseId: {tool_use_id}"
+                                            )
+                                            yield {
+                                                "tool": tool_name,
+                                                "input": args_obj,
+                                                "toolUseId": tool_use_id,
+                                            }
+                                    except json.JSONDecodeError:
+                                        pass
+                if getattr(chunk, "tool_calls", None):
+                    for tc in chunk.tool_calls:
+                        if isinstance(tc, dict):
+                            tid, name, args = (
+                                tc.get("id", ""),
+                                tc.get("name", ""),
+                                tc.get("args", {}),
+                            )
+                        else:
+                            tid = getattr(tc, "id", "") or ""
+                            name = getattr(tc, "name", "") or ""
+                            args = getattr(tc, "args", {}) or {}
+                        if tid and tid not in yielded_tool_ids:
+                            yielded_tool_ids.add(tid)
+                            yield {"tool": name, "input": args, "toolUseId": tid}
 
-        elif isinstance(chunk, AIMessage):
-            content = chunk.content
-            text_parts = []
-            if isinstance(content, str) and content:
-                text_parts.append(content)
-            elif isinstance(content, list):
-                for item in content:
-                    if isinstance(item, dict) and item.get("type") == "text":
-                        text_part = item.get("text", "")
-                        if text_part:
-                            text_parts.append(text_part)
-            for text_part in text_parts:
-                if tool_used:
-                    result_text = text_part
-                    tool_used = False
-                else:
-                    result_text += text_part
-                yield {"data": text_part}
-            if getattr(chunk, "tool_calls", None):
-                for tc in chunk.tool_calls:
-                    if isinstance(tc, dict):
-                        tid, name, args = (
-                            tc.get("id", ""),
-                            tc.get("name", ""),
-                            tc.get("args", {}),
-                        )
+            elif isinstance(chunk, AIMessage):
+                content = chunk.content
+                text_parts = []
+                if isinstance(content, str) and content:
+                    text_parts.append(content)
+                elif isinstance(content, list):
+                    for item in content:
+                        if isinstance(item, dict) and item.get("type") == "text":
+                            text_part = item.get("text", "")
+                            if text_part:
+                                text_parts.append(text_part)
+                for text_part in text_parts:
+                    if tool_used:
+                        result_text = text_part
+                        tool_used = False
                     else:
-                        tid = getattr(tc, "id", "") or ""
-                        name = getattr(tc, "name", "") or ""
-                        args = getattr(tc, "args", {}) or {}
-                    if tid and tid not in yielded_tool_ids:
-                        yielded_tool_ids.add(tid)
-                        yield {"tool": name, "input": args, "toolUseId": tid}
+                        result_text += text_part
+                    yield {"data": text_part}
+                if getattr(chunk, "tool_calls", None):
+                    for tc in chunk.tool_calls:
+                        if isinstance(tc, dict):
+                            tid, name, args = (
+                                tc.get("id", ""),
+                                tc.get("name", ""),
+                                tc.get("args", {}),
+                            )
+                        else:
+                            tid = getattr(tc, "id", "") or ""
+                            name = getattr(tc, "name", "") or ""
+                            args = getattr(tc, "args", {}) or {}
+                        if tid and tid not in yielded_tool_ids:
+                            yielded_tool_ids.add(tid)
+                            yield {"tool": name, "input": args, "toolUseId": tid}
 
-        elif isinstance(chunk, ToolMessage):
-            logger.info(f"ToolMessage: {chunk.name}, {chunk.content}")
-            tool_used = True
-            yield {"toolResult": chunk.content, "toolUseId": chunk.tool_call_id}
+            elif isinstance(chunk, ToolMessage):
+                logger.info(f"ToolMessage: {chunk.name}, {chunk.content}")
+                tool_used = True
+                yield {"toolResult": chunk.content, "toolUseId": chunk.tool_call_id}
 
-    if not result_text.strip():
-        result_text = "답변을 찾지 못하였습니다."
+        if not result_text.strip():
+            result_text = "답변을 찾지 못하였습니다."
 
-    final_output = {
-        "messages": [{"role": "assistant", "content": result_text}],
-        "image_url": [],
-    }
-    logger.info(f"final_output: {result_text[:200]!r}...")
-    yield {"result": final_output}
+        final_output = {
+            "messages": [{"role": "assistant", "content": result_text}],
+            "image_url": [],
+        }
+        logger.info(f"final_output: {result_text[:200]!r}...")
+        yield {"result": final_output}
+    finally:
+        if history_mode == "Enable":
+            await chat.persist_checkpoint_to_session_storage()
 
 if __name__ == "__main__":
     app.run()
