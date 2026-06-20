@@ -570,21 +570,18 @@ pip install boto3
 git clone https://github.com/kyopark2014/langgraph-runtime
 ```
 
-아래와 같이 루트 [installer.py](./installer.py)를 이용해 AWS 인프라 설치를 시작합니다.
-
-```text
-cd langgraph-runtime && python3 installer.py
-```
-
 Agent Runtime만 빌드하여 배포할 때에는 아래를 이용합니다. 
 
 ```text
-cd runtime_agent/langgraph && python3 installer.py
+python3 langgraph-runtime/runtime_agent/langgraphinstaller.py
 ```
 
-API 구현에 필요한 credential은 secret으로 관리합니다. 따라서 설치시 필요한 credential 입력이 필요한데 아래와 같은 방식을 활용하여 미리 credential을 준비합니다. 
+아래와 같이 루트 [installer.py](./installer.py)를 이용해 ECS 설치를 시작합니다.
 
-- 일반 인터넷 검색: [Tavily Search](https://app.tavily.com/sign-in)에 접속하여 가입 후 API Key를 발급합니다. 이것은 tvly-로 시작합니다.  
+```text
+python3 langgraph-runtime/installer.py
+```
+
 
 설치가 완료되면 CloudFront로 접속하여 동작을 확인합니다. 
 
