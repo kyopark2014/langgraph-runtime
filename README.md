@@ -173,8 +173,7 @@ async def ensure_checkpointer():
 
 ```python
 return workflow.compile(
-    checkpointer=chat.checkpointer,
-    store=chat.memorystore
+    checkpointer=chat.checkpointer
 )
 ```
 
