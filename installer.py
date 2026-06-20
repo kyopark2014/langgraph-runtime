@@ -51,7 +51,6 @@ BEDROCK_NON_FILTERABLE_METADATA_KEYS = [
 # Initialize boto3 clients
 s3_client = boto3.client("s3", region_name=region)
 iam_client = boto3.client("iam", region_name=region)
-secrets_client = boto3.client("secretsmanager", region_name=region)
 opensearch_client = boto3.client("opensearchserverless", region_name=region)
 s3vectors_client = boto3.client("s3vectors", region_name=region)
 ec2_client = boto3.client("ec2", region_name=region)
@@ -705,59 +704,6 @@ def create_ecs_roles(knowledge_base_role_arn: str) -> Dict[str, str]:
         "task_role_arn": task_role_arn,
         "execution_role_arn": execution_role_arn,
     }
-
-
-def create_secrets() -> Dict[str, str]:
-    """Create Secrets Manager secrets."""
-    logger.info("[3/10] Creating Secrets Manager secrets")
-    logger.info("Please enter API keys when prompted (press Enter to skip and leave empty):")
-    
-    secrets = {
-        "tavily": {
-            "name": f"tavilyapikey-{project_name}",
-            "description": "secret for tavily api key",
-            "secret_value": {
-                "project_name": project_name,
-                "tavily_api_key": ""
-            }
-        }
-    }
-    
-    secret_arns = {}
-    
-    for key, secret_config in secrets.items():
-        # Check if secret already exists before prompting for input
-        try:
-            response = secrets_client.describe_secret(SecretId=secret_config["name"])
-            secret_arns[key] = response["ARN"]
-            logger.warning(f"  Secret already exists: {secret_config['name']}")
-        except ClientError as e:
-            if e.response["Error"]["Code"] == "ResourceNotFoundException":
-                # Secret doesn't exist, prompt for API key and create it
-                if key == "tavily":
-                    logger.info(f"Enter credential of {secret_config['name']} (Tavily API Key):")
-                    api_key = input(f"Creating {secret_config['name']} - Tavily API Key: ").strip()
-                    secret_config["secret_value"]["tavily_api_key"] = api_key
-                
-                # Create the secret
-                try:
-                    response = secrets_client.create_secret(
-                        Name=secret_config["name"],
-                        Description=secret_config["description"],
-                        SecretString=json.dumps(secret_config["secret_value"])
-                    )
-                    secret_arns[key] = response["ARN"]
-                    logger.info(f"  ✓ Created secret: {secret_config['name']}")
-                except ClientError as create_error:
-                    logger.error(f"  Failed to create secret {secret_config['name']}: {create_error}")
-                    raise
-            else:
-                logger.error(f"  Failed to check secret {secret_config['name']}: {e}")
-                raise
-    
-    logger.info(f"✓ Created {len(secret_arns)} secrets")
-    
-    return secret_arns
 
 
 def create_opensearch_collection(ec2_role_arn: str = None, knowledge_base_role_arn: str = None) -> Dict[str, str]:
@@ -5010,11 +4956,7 @@ def main():
         )
         logger.info(f"IAM roles created...")
         
-        # 3. Create secrets
-        secret_arns = create_secrets()
-        logger.info(f"Secrets created...")
-        
-        # 4. Create S3 Vectors store
+        # 3. Create S3 Vectors store
         s3_vectors_info = create_s3_vectors_store()
         logger.info("S3 Vectors store created...")
         

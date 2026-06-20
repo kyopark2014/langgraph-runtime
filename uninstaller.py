@@ -25,7 +25,6 @@ account_id = sts_client.get_caller_identity()["Account"]
 # Initialize boto3 clients
 s3_client = boto3.client("s3", region_name=region)
 iam_client = boto3.client("iam", region_name=region)
-secrets_client = boto3.client("secretsmanager", region_name=region)
 opensearch_client = boto3.client("opensearchserverless", region_name=region)
 ec2_client = boto3.client("ec2", region_name=region)
 elbv2_client = boto3.client("elbv2", region_name=region)
@@ -1021,29 +1020,6 @@ def delete_knowledge_bases():
     except Exception as e:
         logger.error(f"Error deleting Knowledge Bases: {e}")
 
-def delete_secrets():
-    """Delete Secrets Manager secrets."""
-    logger.info("[6/9] Deleting secrets")
-
-    secret_names = []
-
-    if not secret_names:
-        logger.info("  No secrets configured for deletion")
-        return
-
-    for secret_name in secret_names:
-        try:
-            secrets_client.delete_secret(
-                SecretId=secret_name,
-                ForceDeleteWithoutRecovery=True
-            )
-            logger.info(f"  ✓ Deleted secret: {secret_name}")
-        except ClientError as e:
-            if e.response["Error"]["Code"] != "ResourceNotFoundException":
-                logger.warning(f"  Could not delete secret {secret_name}: {e}")
-    
-    logger.info("✓ Secrets deleted")
-
 def delete_security_groups():
     """Delete security groups with proper dependency handling."""
     logger.info("[4/9] Deleting security groups")
@@ -1949,7 +1925,6 @@ def main():
         agentcore_gateway_deleted = delete_agentcore_websearch_gateway(
             skip_confirmation=args.delete_agentcore_gateway
         )
-        delete_secrets()
         delete_iam_roles(delete_agentcore_gateway_role=agentcore_gateway_deleted)
         delete_s3_buckets()
         delete_disabled_cloudfront_distributions()
