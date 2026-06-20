@@ -819,120 +819,31 @@ def docker_login(account_id, region):
         print(f"Error: Failed to login to ECR: {e}")
         return False
 
-ARM64_BUILDX_BUILDER = "langgraph-arm64-builder"
-
-
-def _host_machine() -> str:
-    return os.uname().machine.lower()
-
-
 def _host_is_arm64() -> bool:
-    return _host_machine() in ("aarch64", "arm64")
-
-
-def setup_arm64_cross_build() -> bool:
-    """Enable ARM64 cross-build via QEMU and buildx on x86_64 hosts."""
-    print("===== Setting Up ARM64 Cross-Build =====", flush=True)
-    print(f"  Host architecture: {os.uname().machine}", flush=True)
-    print("  AgentCore requires linux/arm64 images.", flush=True)
-
-    binfmt = subprocess.run(
-        ["docker", "run", "--privileged", "--rm", "tonistiigi/binfmt", "--install", "all"],
-        capture_output=True,
-        text=True,
-        timeout=180,
-        check=False,
-    )
-    if binfmt.returncode == 0:
-        print("  ✓ QEMU binfmt handlers installed", flush=True)
-    else:
-        err = (binfmt.stderr or binfmt.stdout).strip()
-        print(f"  Warning: QEMU binfmt setup returned {binfmt.returncode}: {err}", flush=True)
-
-    inspect = subprocess.run(
-        ["docker", "buildx", "inspect", ARM64_BUILDX_BUILDER],
-        capture_output=True,
-        text=True,
-        timeout=60,
-        check=False,
-    )
-    if inspect.returncode != 0:
-        create = subprocess.run(
-            [
-                "docker", "buildx", "create",
-                "--name", ARM64_BUILDX_BUILDER,
-                "--driver", "docker-container",
-                "--use",
-                "--bootstrap",
-            ],
-            capture_output=True,
-            text=True,
-            timeout=300,
-            check=False,
-        )
-        if create.returncode != 0:
-            err = (create.stderr or create.stdout).strip()
-            print(f"Error: Failed to create buildx builder: {err}", flush=True)
-            return False
-    else:
-        use = subprocess.run(
-            ["docker", "buildx", "use", ARM64_BUILDX_BUILDER],
-            capture_output=True,
-            text=True,
-            timeout=60,
-            check=False,
-        )
-        if use.returncode != 0:
-            err = (use.stderr or use.stdout).strip()
-            print(f"Error: Failed to select buildx builder: {err}", flush=True)
-            return False
-
-    platforms = subprocess.run(
-        ["docker", "buildx", "inspect", "--bootstrap"],
-        capture_output=True,
-        text=True,
-        timeout=120,
-        check=False,
-    )
-    output = (platforms.stdout or platforms.stderr).lower()
-    if "arm64" not in output and "aarch64" not in output:
-        print("Error: buildx builder does not advertise linux/arm64 support.", flush=True)
-        return False
-
-    print("  ✓ ARM64 cross-build ready (buildx + QEMU)", flush=True)
-    return True
+    return os.uname().machine.lower() in ("aarch64", "arm64")
 
 
 def build_and_push_arm64_image(local_tag: str, ecr_uri: str) -> bool:
-    """Build an ARM64 image and push it to ECR."""
-    if _host_is_arm64():
-        if not run_docker_command(
-            ["docker", "build", "--platform", "linux/arm64", "-t", local_tag, "."],
-            "Building Docker Image",
-        ):
-            return False
-        if not run_docker_command(
-            ["docker", "tag", local_tag, ecr_uri],
-            "Tagging for ECR Repository",
-        ):
-            return False
-        return run_docker_command(
-            ["docker", "push", ecr_uri],
-            "Pushing Image to ECR Repository",
-        )
-
-    if not setup_arm64_cross_build():
+    """Build an ARM64 image and push it to ECR (native build on ARM64 hosts only)."""
+    if not _host_is_arm64():
+        print("Error: AgentCore requires linux/arm64 images.", flush=True)
+        print(f"  Current host architecture: {os.uname().machine}", flush=True)
+        print("  Build on an ARM64 EC2 instance (e.g. t4g, m7g) and retry.", flush=True)
         return False
 
+    if not run_docker_command(
+        ["docker", "build", "--platform", "linux/arm64", "-t", local_tag, "."],
+        "Building Docker Image",
+    ):
+        return False
+    if not run_docker_command(
+        ["docker", "tag", local_tag, ecr_uri],
+        "Tagging for ECR Repository",
+    ):
+        return False
     return run_docker_command(
-        [
-            "docker", "buildx", "build",
-            "--platform", "linux/arm64",
-            "-t", ecr_uri,
-            "--push",
-            ".",
-        ],
-        "Building and Pushing Docker Image (ARM64 cross-build)",
+        ["docker", "push", ecr_uri],
+        "Pushing Image to ECR Repository",
     )
 
 
@@ -951,8 +862,8 @@ def run_docker_command(command, description):
             print(f"Error: {description} failed (exit {result.returncode})", flush=True)
             if command and command[0] == "docker" and "build" in command:
                 print(
-                    "  If the build log shows 'exec format error', the host cannot run "
-                    "ARM64 build steps without QEMU/buildx cross-build support.",
+                    "  If the build log shows 'exec format error', use an ARM64 EC2 instance "
+                    "(e.g. t4g, m7g).",
                     flush=True,
                 )
                 print(
