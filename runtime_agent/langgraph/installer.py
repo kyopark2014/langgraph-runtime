@@ -912,6 +912,39 @@ def update_agentcore_json(agent_runtime_arn, image_tag=None):
         print(f"Error updating config.json: {e}")
         return False
 
+SESSION_STORAGE_MOUNT_PATH = "/mnt/workspace"
+
+
+def session_storage_filesystem_configurations():
+    """Managed session storage for LangGraph checkpoint persistence across stop/resume."""
+    return [
+        {
+            "sessionStorage": {
+                "mountPath": SESSION_STORAGE_MOUNT_PATH,
+            }
+        }
+    ]
+
+
+def verify_session_storage_config(client, agent_runtime_id: str) -> bool:
+    """Confirm sessionStorage is configured on the agent runtime."""
+    response = client.get_agent_runtime(agentRuntimeId=agent_runtime_id)
+    filesystem_configs = response.get("filesystemConfigurations") or []
+    for cfg in filesystem_configs:
+        session_storage = cfg.get("sessionStorage") or {}
+        mount_path = session_storage.get("mountPath")
+        if mount_path == SESSION_STORAGE_MOUNT_PATH:
+            print(f"✓ sessionStorage verified: mountPath={mount_path}")
+            return True
+
+    print(
+        "⚠ sessionStorage not found in filesystemConfigurations. "
+        "Cold start may not restore /mnt/workspace checkpoint data."
+    )
+    print(f"  filesystemConfigurations: {filesystem_configs or None}")
+    return False
+
+
 def create_agent_runtime_func(config, repository_name, image_tag):
     """Create a new Agent Runtime."""
     aws_region = config['region']
@@ -936,13 +969,7 @@ def create_agent_runtime_func(config, repository_name, image_tag):
                     'containerUri': f"{account_id}.dkr.ecr.{aws_region}.amazonaws.com/{repository_name}:{image_tag}"
                 }
             },
-            filesystemConfigurations=[
-                {
-                    "sessionStorage": {
-                        "mountPath": "/mnt/workspace"  # /mnt/ 하위 경로 필수
-                    }
-                }
-            ],
+            filesystemConfigurations=session_storage_filesystem_configurations(),
             networkConfiguration={"networkMode": "PUBLIC"}, 
             roleArn=agent_runtime_role
         )
@@ -984,6 +1011,7 @@ def update_agent_runtime_func(config, repository_name, agent_runtime_id, image_t
                     'containerUri': f"{account_id}.dkr.ecr.{aws_region}.amazonaws.com/{repository_name}:{image_tag}"
                 }
             },
+            filesystemConfigurations=session_storage_filesystem_configurations(),
             roleArn=agent_runtime_role,
             networkConfiguration={"networkMode": "PUBLIC"},
             protocolConfiguration={"serverProtocol": "HTTP"}
@@ -1051,6 +1079,13 @@ def create_agent_runtime():
         if not agent_runtime_arn:
             print("Error: Failed to create/update agent runtime")
             return False
+
+        resolved_runtime_id = agent_runtime_id
+        if not resolved_runtime_id and agent_runtime_arn:
+            resolved_runtime_id = agent_runtime_arn.rsplit("/", 1)[-1]
+
+        if resolved_runtime_id:
+            verify_session_storage_config(client, resolved_runtime_id)
         
         # Update config.json
         update_agentcore_json(agent_runtime_arn, image_tag)

@@ -120,10 +120,7 @@ def runtime_session_id_for(user_id: str, history_mode: str) -> str:
     Agent mode: ephemeral session per request.
     """
     if history_mode == "Enable" and user_id:
-        agent_tag = config.get("agent_latest_image_tag") or config.get("latest_image_tag") or ""
         seed = f"agentcore-session-{user_id}"
-        if agent_tag:
-            seed = f"{seed}-{agent_tag}"
         session_id = str(uuid.uuid5(uuid.NAMESPACE_DNS, seed))
     else:
         session_id = str(uuid.uuid4())

@@ -720,10 +720,7 @@ def buildChatAgentWithHistory(tools):
     )
     workflow.add_edge("action", "agent")
 
-    return workflow.compile(
-        checkpointer=chat.checkpointer,
-        store=chat.memorystore
-    )
+    return workflow.compile(checkpointer=chat.checkpointer)
 
 def load_multiple_mcp_server_parameters(mcp_json: dict):
     mcpServers = mcp_json.get("mcpServers")

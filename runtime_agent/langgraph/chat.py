@@ -1,3 +1,6 @@
+import asyncio
+import shutil
+import sqlite3
 import traceback
 import boto3
 import os
@@ -26,14 +29,13 @@ from langchain_core.messages import HumanMessage, AIMessage, ToolMessage, AIMess
 from langchain_mcp_adapters.client import MultiServerMCPClient
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 from langgraph.checkpoint.memory import MemorySaver
-from langgraph.store.memory import InMemoryStore
 
 try:
     from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
-    _SQLITE_CHECKPOINTER_AVAILABLE = True
+    SQLITE_CHECKPOINTER_AVAILABLE = True
 except ImportError:
     AsyncSqliteSaver = None  # type: ignore[misc, assignment]
-    _SQLITE_CHECKPOINTER_AVAILABLE = False
+    SQLITE_CHECKPOINTER_AVAILABLE = False
 
 import logging
 import sys
@@ -83,7 +85,6 @@ def update(userId, modelName, debugMode):
     if userId != user_id:
         user_id = userId
         logger.info(f"user_id: {user_id}")
-        initiate()
 
     if model_name != modelName:
         model_name = modelName
@@ -101,47 +102,169 @@ SESSION_STORAGE_DIR = os.environ.get(
     "SESSION_STORAGE_DIR",
     "/mnt/workspace" if os.path.isdir("/mnt/workspace") else os.path.join(workingDir, ".session_storage"),
 )
-CHECKPOINT_DB = os.path.join(SESSION_STORAGE_DIR, "langgraph_checkpoints.sqlite")
-
-memorystores = dict()
+LEGACY_CHECKPOINT_DB = os.path.join(SESSION_STORAGE_DIR, "langgraph_checkpoints.sqlite")
 
 checkpointer = MemorySaver()
-memorystore = InMemoryStore()
 _sqlite_checkpointer = None
 _sqlite_checkpointer_cm = None
+_active_checkpoint_session = None
+_checkpointer_init_lock = asyncio.Lock()
+SQLITE_BUSY_TIMEOUT_MS = 5000
+_SETUP_MAX_ATTEMPTS = 5
+_SETUP_RETRY_BASE_SEC = 0.25
 
 
-def _session_storage_enabled() -> bool:
-    return os.environ.get("SESSION_STORAGE_ENABLED", "true").lower() not in ("0", "false", "no")
+def _runtime_session_id() -> str | None:
+    try:
+        from bedrock_agentcore.runtime.context import BedrockAgentCoreContext
+
+        return BedrockAgentCoreContext.get_session_id()
+    except Exception:
+        return None
+
+
+def get_checkpoint_db_path() -> str:
+    """Use local /tmp for SQLite; AgentCore session storage can break file locking."""
+    session_id = _runtime_session_id()
+    if session_id:
+        local_dir = os.path.join("/tmp", "langgraph-checkpoints", session_id)
+        os.makedirs(local_dir, exist_ok=True)
+        return os.path.join(local_dir, "langgraph_checkpoints.sqlite")
+    return LEGACY_CHECKPOINT_DB
+
+
+def _setup_lock_file(checkpoint_db: str) -> str:
+    return checkpoint_db + ".setup.lock"
+
+
+def _maybe_import_legacy_checkpoint(checkpoint_db: str) -> None:
+    if checkpoint_db == LEGACY_CHECKPOINT_DB or _checkpoint_db_ready(checkpoint_db):
+        return
+    if os.path.isfile(LEGACY_CHECKPOINT_DB) and os.path.getsize(LEGACY_CHECKPOINT_DB) > 0:
+        shutil.copy2(LEGACY_CHECKPOINT_DB, checkpoint_db)
+        logger.info(f"Seeded checkpoint DB from session storage: {checkpoint_db}")
+
+
+def _is_sqlite_locked_error(exc: BaseException) -> bool:
+    if isinstance(exc, sqlite3.OperationalError):
+        return "locked" in str(exc).lower()
+    cause = getattr(exc, "__cause__", None)
+    return isinstance(cause, sqlite3.OperationalError) and "locked" in str(cause).lower()
+
+
+def _checkpoint_db_ready(checkpoint_db: str) -> bool:
+    return os.path.isfile(checkpoint_db) and os.path.getsize(checkpoint_db) > 0
+
+
+async def _configure_sqlite_connection(conn) -> None:
+    await conn.execute(f"PRAGMA busy_timeout={SQLITE_BUSY_TIMEOUT_MS}")
+    await conn.commit()
+
+
+async def _open_existing_sqlite_checkpointer(checkpoint_db: str):
+    import aiosqlite
+
+    for attempt in range(1, _SETUP_MAX_ATTEMPTS + 1):
+        conn = None
+        try:
+            conn = await aiosqlite.connect(
+                checkpoint_db,
+                timeout=SQLITE_BUSY_TIMEOUT_MS / 1000,
+            )
+            await _configure_sqlite_connection(conn)
+            saver = AsyncSqliteSaver(conn)
+            saver.is_setup = True
+            return saver
+        except Exception as exc:
+            if conn is not None:
+                await conn.close()
+            if not _is_sqlite_locked_error(exc):
+                raise
+            if attempt == _SETUP_MAX_ATTEMPTS:
+                raise
+            delay = _SETUP_RETRY_BASE_SEC * (2 ** (attempt - 1))
+            logger.warning(
+                f"SQLite open locked (attempt {attempt}/{_SETUP_MAX_ATTEMPTS}), "
+                f"retrying in {delay:.2f}s"
+            )
+            await asyncio.sleep(delay)
+
+
+async def _create_sqlite_checkpointer(checkpoint_db: str):
+    import aiosqlite
+
+    for attempt in range(1, _SETUP_MAX_ATTEMPTS + 1):
+        conn = None
+        try:
+            conn = await aiosqlite.connect(
+                checkpoint_db,
+                timeout=SQLITE_BUSY_TIMEOUT_MS / 1000,
+            )
+            await _configure_sqlite_connection(conn)
+            saver = AsyncSqliteSaver(conn)
+            await saver.setup()
+            return saver
+        except Exception as exc:
+            if conn is not None:
+                await conn.close()
+            if not _is_sqlite_locked_error(exc):
+                raise
+            if attempt == _SETUP_MAX_ATTEMPTS:
+                raise
+            delay = _SETUP_RETRY_BASE_SEC * (2 ** (attempt - 1))
+            logger.warning(
+                f"SQLite checkpointer locked (attempt {attempt}/{_SETUP_MAX_ATTEMPTS}), "
+                f"retrying in {delay:.2f}s"
+            )
+            await asyncio.sleep(delay)
 
 
 async def ensure_checkpointer():
-    """Initialize AsyncSqliteSaver on AgentCore session storage (or local fallback)."""
-    global checkpointer, _sqlite_checkpointer, _sqlite_checkpointer_cm
+    """Initialize AsyncSqliteSaver on local disk (per AgentCore session)."""
+    global checkpointer, _sqlite_checkpointer, _sqlite_checkpointer_cm, _active_checkpoint_session
 
-    if _sqlite_checkpointer is not None:
+    session_id = _runtime_session_id()
+    checkpoint_db = get_checkpoint_db_path()
+
+    if _sqlite_checkpointer is not None and _active_checkpoint_session == session_id:
         checkpointer = _sqlite_checkpointer
         return checkpointer
 
-    if not _session_storage_enabled() or not _SQLITE_CHECKPOINTER_AVAILABLE:
-        logger.warning(
-            "Using in-memory checkpointer (SESSION_STORAGE_ENABLED=false or "
-            "langgraph-checkpoint-sqlite not installed)"
-        )
+    if not SQLITE_CHECKPOINTER_AVAILABLE:
+        logger.info("Using in-memory checkpointer (langgraph-checkpoint-sqlite not installed)")
         checkpointer = MemorySaver()
         return checkpointer
 
-    os.makedirs(SESSION_STORAGE_DIR, exist_ok=True)
-    _sqlite_checkpointer_cm = AsyncSqliteSaver.from_conn_string(CHECKPOINT_DB)
-    _sqlite_checkpointer = await _sqlite_checkpointer_cm.__aenter__()
-    await _sqlite_checkpointer.setup()
-    checkpointer = _sqlite_checkpointer
-    logger.info(f"SQLite checkpointer ready: {CHECKPOINT_DB}")
-    return checkpointer
+    async with _checkpointer_init_lock:
+        if _sqlite_checkpointer is not None and _active_checkpoint_session == session_id:
+            checkpointer = _sqlite_checkpointer
+            return checkpointer
+
+        _sqlite_checkpointer = None
+        _sqlite_checkpointer_cm = None
+        _active_checkpoint_session = session_id
+
+        try:
+            _maybe_import_legacy_checkpoint(checkpoint_db)
+            if _checkpoint_db_ready(checkpoint_db):
+                _sqlite_checkpointer = await _open_existing_sqlite_checkpointer(checkpoint_db)
+                logger.info(f"SQLite checkpointer opened (existing): {checkpoint_db}")
+            else:
+                _sqlite_checkpointer = await _create_sqlite_checkpointer(checkpoint_db)
+                logger.info(f"SQLite checkpointer initialized: {checkpoint_db}")
+        except Exception as exc:
+            logger.error(
+                f"SQLite checkpointer unavailable ({exc}); falling back to MemorySaver"
+            )
+            checkpointer = MemorySaver()
+            return checkpointer
+
+        checkpointer = _sqlite_checkpointer
+        return checkpointer
 
 
-def _memory_scope(mcp_servers: list, skill_list: list) -> str:
-    """Isolate LangGraph memory per user and tool/skill configuration."""
+def _thread_scope(mcp_servers: list, skill_list: list) -> str:
+    """Isolate checkpoint threads per user and tool/skill configuration."""
     import hashlib
 
     payload = json.dumps(
@@ -154,32 +277,6 @@ def _memory_scope(mcp_servers: list, skill_list: list) -> str:
     digest = hashlib.sha256(payload.encode()).hexdigest()[:12]
     return f"{user_id}:{digest}"
 
-
-def bind_memory(mcp_servers: list, skill_list: list) -> str:
-    """Select or create in-memory store for the current user/tool scope.
-
-    Conversation checkpoints are persisted in a shared SQLite file under
-    session storage; individual conversations are isolated by thread_id.
-    """
-    global memorystore
-
-    scope = _memory_scope(mcp_servers, skill_list)
-    if scope in memorystores:
-        logger.info(f"memory exist. reuse scope: {scope}")
-        memorystore = memorystores[scope]
-    else:
-        logger.info(f"memory not exist. create new scope: {scope}")
-        memorystore = InMemoryStore()
-        memorystores[scope] = memorystore
-    return scope
-
-
-def initiate():
-    global memorystore, memorystores
-
-    logger.info("reset in-memory store scopes (SQLite checkpoints are preserved)")
-    memorystores.clear()
-    memorystore = InMemoryStore()
 
 selected_chat = 0
 def get_max_output_tokens(model_id: str = "") -> int:
@@ -1214,7 +1311,10 @@ def get_tool_info(tool_name, tool_content):
     return content, urls, tool_references
 
 async def create_agent(mcp_servers: list, skill_list: list, history_mode: str="Disable") -> tuple[str, list]:
-    memory_scope = bind_memory(mcp_servers, skill_list)
+    thread_scope = _thread_scope(mcp_servers, skill_list)
+
+    if history_mode == "Enable":
+        await ensure_checkpointer()
 
     # builtin tools
     tools = langgraph_agent.get_builtin_tools()
@@ -1257,10 +1357,9 @@ async def create_agent(mcp_servers: list, skill_list: list, history_mode: str="D
         logger.warning("No tools available, using general conversation mode")
         return None, None
     
-    thread_id = memory_scope if history_mode == "Enable" else user_id
+    thread_id = thread_scope if history_mode == "Enable" else user_id
 
     if history_mode == "Enable":
-        await ensure_checkpointer()
         app = langgraph_agent.buildChatAgentWithHistory(tools)
         config = {
             "recursion_limit": 100,

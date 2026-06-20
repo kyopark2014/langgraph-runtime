@@ -1,6 +1,7 @@
 import json
 import logging
 import sys
+import traceback
 import chat
 import utils
 import httpx
@@ -159,7 +160,17 @@ async def agent_langgraph(payload):
         httpx.AsyncClient.__init__ = patched_init
         logger.info("Applied SigV4 monkey patch")
 
-    app, config = await chat.create_agent(mcp_servers, skill_list, history_mode)
+    try:
+        app, config = await chat.create_agent(mcp_servers, skill_list, history_mode)
+    except Exception as e:
+        logger.error(f"Failed to create agent: {traceback.format_exc()}")
+        yield {
+            "result": {
+                "messages": [{"role": "assistant", "content": f"에이전트 초기화 오류: {e}"}],
+                "image_url": [],
+            }
+        }
+        return
     if app is None:
         yield {"result": {"messages": [{"role": "assistant", "content": "사용 가능한 도구가 없습니다."}], "image_url": []}}
         return
