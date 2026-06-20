@@ -788,7 +788,7 @@ def push_to_ecr():
         # Build Docker image
         print("Build output streams below (this may take several minutes)...", flush=True)
         if not run_docker_command(
-            ["docker", "build", "-t", f"{ecr_repository}:{image_tag}", "."],
+            ["docker", "build", "--platform", "linux/arm64", "-t", f"{ecr_repository}:{image_tag}", "."],
             "Building Docker Image"
         ):
             return False

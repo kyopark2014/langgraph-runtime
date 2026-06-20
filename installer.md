@@ -75,21 +75,19 @@ custom_header_value = f"{project_name}_12dab15e4s31"
 |------|------|
 | `role-knowledge-base-for-{project_name}-{region}` | Bedrock Knowledge Base용 역할 (S3 Vectors 접근 포함) |
 | `role-agent-for-{project_name}-{region}` | Bedrock Agent용 역할 |
-| `role-ecs-task-for-{project_name}-{region}` | ECS 태스크용 역할 (Bedrock, S3, Secrets Manager 등 앱 권한) |
+| `role-ecs-task-for-{project_name}-{region}` | ECS 태스크용 역할 (Bedrock, S3, AgentCore 등 앱 권한) |
 | `role-ecs-execution-for-{project_name}-{region}` | ECS 태스크 실행 역할 (ECR pull, CloudWatch Logs) |
 | `role-agentcore-memory-for-{project_name}-{region}` | AgentCore Memory용 역할 |
+| `role-agentcore-gateway-websearch-for-{project_name}` | AgentCore Web Search gateway용 역할 (`us-east-1`) |
 
 > `create_lambda_role()` 함수는 코드에 남아 있으나, 현재 `main()` 배포 흐름에서는 호출되지 않습니다.
 
-### 3. Secrets Manager
-- `tavilyapikey-{project_name}`: Tavily API 키 (실행 시 프롬프트로 입력, Enter로 건너뛰기 가능)
-
-### 4. S3 Vectors (벡터 스토어)
+### 3. S3 Vectors (벡터 스토어)
 - **벡터 버킷**: `{project_name}-{account_id}`
 - **인덱스**: `{project_name}` (1024차원, cosine, float32)
 - **메타데이터**: Bedrock 필수 키(`AMAZON_BEDROCK_TEXT`, `AMAZON_BEDROCK_METADATA`)를 non-filterable로 설정
 
-### 5. VPC 네트워킹
+### 4. VPC 네트워킹
 
 ```
 VPC (10.20.0.0/16)
@@ -105,26 +103,26 @@ VPC (10.20.0.0/16)
     └── Bedrock Runtime 엔드포인트
 ```
 
-### 6. Application Load Balancer
+### 5. Application Load Balancer
 - **타입**: Internet-facing Application Load Balancer
 - **리스너**: HTTP 포트 80
 - **타겟 그룹**: ECS Fargate 태스크 (IP 타겟, 포트 8501)
 - **헬스체크**: `/_stcore/health`
 
-### 7. CloudFront 배포
+### 6. CloudFront 배포
 - **오리진**:
   - 기본: ALB (동적 컨텐츠)
   - `/images/*`, `/docs/*`: S3 (정적 컨텐츠)
 - **캐시 정책**: Managed-CachingDisabled
 - **프로토콜**: HTTP → HTTPS 리다이렉트
 
-### 8. ECR (Elastic Container Registry)
+### 7. ECR (Elastic Container Registry)
 - **리포지토리**: `ecr-for-{project_name}`
 - **이미지 태그**: `latest`
 - **플랫폼**: `linux/amd64`
 - **빌드 소스**: 프로젝트 루트의 `Dockerfile`
 
-### 9. ECS Fargate
+### 8. ECS Fargate
 - **클러스터**: `cluster-for-{project_name}`
 - **서비스**: `service-for-{project_name}`
 - **태스크 정의**: `task-for-{project_name}`
@@ -133,7 +131,7 @@ VPC (10.20.0.0/16)
 - **배포 위치**: Private Subnet (퍼블릭 IP 없음)
 - **로그**: CloudWatch Logs `/ecs/app-for-{project_name}`
 
-### 10. Bedrock Knowledge Base
+### 9. Bedrock Knowledge Base
 - **스토리지**: S3 Vectors (`S3_VECTORS` 타입)
 - **임베딩 모델**: Amazon Titan Embed Text v2 (1024차원, FLOAT32)
 - **파싱**: 기본 파서 (default parser)
@@ -141,6 +139,24 @@ VPC (10.20.0.0/16)
 - **데이터 소스**: S3 `docs/` 프리픽스
 
 > `create_opensearch_collection()` 함수는 이전 버전 호환을 위해 코드에 남아 있으나, 현재 배포 흐름에서는 사용하지 않습니다.
+
+### 10. AgentCore 리소스
+
+#### AgentCore Web Search Gateway
+- **이름**: `gateway-websearch`
+- **리전**: `us-east-1` (AgentCore Gateway 전용)
+- **프로토콜**: MCP (`AWS_IAM` 인증)
+- **타겟**: managed `web-search` connector
+- **용도**: 애플리케이션의 웹 검색 MCP 대체
+
+#### Agent / MCP Runtime
+CloudFront 배포 후 `application/config.json`에 `sharing_url`이 반영된 뒤 아래 런타임을 설치합니다.
+
+| 런타임 | 설치 스크립트 |
+|--------|--------------|
+| LangGraph Agent | `runtime_agent/langgraph/installer.py` |
+| kb-retriever MCP | `runtime_mcp/iam_auth/kb-retriever/installer.py` |
+| use-aws MCP | `runtime_mcp/iam_auth/use-aws/installer.py` |
 
 ---
 
@@ -174,7 +190,7 @@ def create_iam_role(role_name: str, assume_role_policy: Dict,
     return role_arn
 ```
 
-#### `create_knowledge_base_role()` / `create_agent_role()` / `create_ecs_roles()` / `create_agentcore_memory_role()`
+#### `create_knowledge_base_role()` / `create_agent_role()` / `create_ecs_roles()` / `create_agentcore_memory_role()` / `create_agentcore_websearch_gateway_role()`
 각 서비스별 IAM 역할 및 인라인 정책 생성
 
 `create_ecs_roles()`는 아래 두 역할을 반환합니다.
@@ -315,6 +331,15 @@ def deploy_ecs_service(
     }
 ```
 
+#### `get_or_create_agentcore_websearch_gateway()`
+AgentCore Web Search gateway 및 managed web-search 타겟 생성/조회
+
+#### `sync_application_capability_lists()`
+`runtime_agent/langgraph/mcp.list`, `skills.list`를 `application/`으로 복사
+
+#### `install_agent_runtime()` / `install_mcp_runtime()`
+LangGraph Agent 및 MCP 런타임 하위 installer 실행
+
 #### `build_app_environment()`
 컨테이너 런타임에 주입할 `application/config.json` 내용 생성
 
@@ -324,7 +349,6 @@ def deploy_ecs_service(
 |------|------|
 | `s3_vectors_bucket_arn()` / `s3_vectors_index_arn()` | S3 Vectors ARN 생성 |
 | `attach_inline_policy()` | IAM 역할에 인라인 정책 연결 |
-| `create_secrets()` | Secrets Manager 시크릿 생성 |
 | `ensure_data_source()` | Knowledge Base S3 데이터 소스 생성/조회 |
 | `delete_knowledge_base()` | Knowledge Base 및 데이터 소스 삭제 |
 | `create_security_group()` | 보안 그룹 생성 |
@@ -400,12 +424,10 @@ python installer.py --verify-deployment
        • Knowledge Base 역할
        • Agent 역할
        • ECS Task / Execution 역할
-       • AgentCore Memory 역할
+       • AgentCore Web Search gateway 역할
+       • AgentCore Web Search gateway 생성 (us-east-1)
        ↓
-[3/10] Secrets Manager 시크릿 생성
-       • Tavily API 키 (선택 입력)
-       ↓
-[4/10] S3 Vectors 스토어 생성
+[3/10] S3 Vectors 스토어 생성
        • 벡터 버킷 + 인덱스
        ↓
 [4.5/10] Bedrock Knowledge Base 생성
@@ -426,8 +448,10 @@ python installer.py --verify-deployment
        • ALB + S3 하이브리드 오리진
        ↓
 [8/10] ECR 리포지토리 생성 및 Docker 이미지 push
-       • Dockerfile 기반 linux/amd64 빌드
-       • ecr-for-{project_name}:latest push
+       • application/config.json 생성 (sharing_url 반영)
+       • mcp.list / skills.list 동기화
+       • LangGraph Agent / kb-retriever / use-aws Runtime 설치
+       • Dockerfile 기반 linux/amd64 빌드 및 push
        ↓
 [9/10] ECS Fargate 서비스 배포
        • CloudWatch Logs 그룹 생성
@@ -463,6 +487,8 @@ Summary:
   S3 Vector Index ARN: arn:aws:s3vectors:...
   Knowledge Base ID: XXXXXXXXXX
   Knowledge Base Role: arn:aws:iam::...
+  AgentCore Web Search Gateway: gateway-websearch (gateway-xxxxxxxx)
+  AgentCore Web Search Gateway URL: https://...
   AgentCore Memory Role: arn:aws:iam::...
 
 Total deployment time: XX.XX minutes
@@ -482,6 +508,11 @@ Total deployment time: XX.XX minutes
 | `vector_index_name`, `vector_index_arn` | S3 Vectors 인덱스 |
 | `s3_bucket`, `s3_arn` | 문서 저장 S3 버킷 |
 | `sharing_url` | CloudFront URL |
+| `agentcore_websearch_gateway_name` | AgentCore Web Search gateway 이름 |
+| `agentcore_websearch_gateway_region` | AgentCore Web Search gateway 리전 (`us-east-1`) |
+| `agentcore_websearch_gateway_id` | AgentCore Web Search gateway ID |
+| `agentcore_websearch_gateway_url` | AgentCore Web Search gateway URL |
+| `agentcore_websearch_gateway_role` | AgentCore Web Search gateway IAM 역할 ARN |
 | `collectionArn`, `opensearch_url` | 레거시 호환용 빈 값 |
 
 ECS 컨테이너에는 `APP_CONFIG_JSON` 환경변수로 동일한 설정이 주입되며, `docker-entrypoint.sh`가 시작 시 `application/config.json`으로 기록합니다.

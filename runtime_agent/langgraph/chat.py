@@ -141,11 +141,37 @@ def get_persistent_checkpoint_db_path() -> str:
 def _restore_from_session_storage(working_db: str) -> None:
     """Copy durable checkpoint from session storage into the local working DB."""
     persistent = get_persistent_checkpoint_db_path()
-    if working_db == persistent or not _checkpoint_db_ready(persistent):
+    if working_db == persistent:
+        return
+
+    if not _checkpoint_db_ready(persistent):
+        if os.path.isfile(persistent):
+            logger.warning(
+                f"Persistent checkpoint empty, skip restore: {persistent} "
+                f"(size={os.path.getsize(persistent)})"
+            )
+        elif os.path.isdir(SESSION_STORAGE_DIR):
+            try:
+                entries = os.listdir(SESSION_STORAGE_DIR)
+            except OSError as exc:
+                entries = [f"<listdir failed: {exc}>"]
+            logger.warning(
+                f"No persistent checkpoint at {persistent}; "
+                f"session storage dir {SESSION_STORAGE_DIR} contents={entries}"
+            )
+        else:
+            logger.warning(
+                f"Session storage unavailable, skip restore: {SESSION_STORAGE_DIR} "
+                f"(expected {persistent})"
+            )
         return
 
     if _checkpoint_db_ready(working_db):
         if os.path.getmtime(persistent) <= os.path.getmtime(working_db):
+            logger.info(
+                f"Working checkpoint is newer, skip restore: working={working_db}, "
+                f"persistent={persistent}"
+            )
             return
 
     os.makedirs(os.path.dirname(working_db), exist_ok=True)
