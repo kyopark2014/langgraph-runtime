@@ -25,19 +25,22 @@ def load_config():
     except Exception as e:
         print(f"Failed to parse config.json file: {e}")
         config = {}
-        session = boto3.Session()
-        region = session.region_name
-        config['region'] = region
-        config['projectName'] = "langgraph-runtime"
-        
+        config["region"] = boto3.Session().region_name or "us-west-2"
+        config["projectName"] = "langgraph-runtime"
+
         sts = boto3.client("sts")
         response = sts.get_caller_identity()
-        accountId = response["Account"]
-        config['accountId'] = accountId
-        
+        config["accountId"] = response["Account"]
+
         with open(config_path, "w", encoding="utf-8") as f:
             json.dump(config, f, indent=2)
-    
+        return config
+
+    if not config.get("region"):
+        config["region"] = boto3.Session().region_name or "us-west-2"
+        with open(config_path, "w", encoding="utf-8") as f:
+            json.dump(config, f, indent=2)
+
     return config
 
 def update_config(key, value):
