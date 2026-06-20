@@ -560,7 +560,7 @@ AgentCore Runtime에서 대화 history를 유지하려면 **managed session stor
 아래와 같이 EC2를 이용해 배포 환경을 구성합니다.
 
 1. AWS Console의 EC2에 접속해서 [Launch instance]를 선택합니다.
-2. EC2 생성시 Architecture로 Arm을 선택하고 나머지는 기본값으로 생성합니다.
+2. EC2 생성시 Architecture로 Arm64을 선택하고 나머지는 기본값으로 생성합니다.
 3. [EC2 Instance Connect]로 접속해서 아래와 같이 python, pip, git, boto3를 설치합니다.
 
 ```text
@@ -585,13 +585,7 @@ docker info
 git clone https://github.com/kyopark2014/langgraph-runtime
 ```
 
-6. Agent Runtime를 빌드합니다.
-   
-```text
-python3 langgraph-runtime/runtime_agent/langgraphinstaller.py
-```
-
-아래와 같이 [installer.py](./installer.py)를 이용해 ECS 설치를 시작합니다.
+6. 아래와 같이 [installer.py](./installer.py)를 이용해 설치를 시작합니다.
 
 ```text
 python3 langgraph-runtime/installer.py
