@@ -1824,46 +1824,6 @@ def uninstall_agent_runtime(runtime_type: str = "langgraph") -> bool:
         logger.error(f"Error uninstalling Agent Runtime ({runtime_type}): {e}")
         return False
 
-def uninstall_mcp_runtime(mcp_type: str) -> bool:
-    """Uninstall MCP Runtime by running the appropriate uninstaller.py script."""
-    logger.info(f"[10/10] Uninstalling MCP Runtime: {mcp_type}")
-    
-    # Determine uninstaller path based on MCP type
-    script_dir = os.path.dirname(os.path.abspath(__file__))
-    
-    if mcp_type == "kb-retriever":
-        uninstaller_path = os.path.join(script_dir, "runtime_mcp", "iam_auth", "kb-retriever", "uninstaller.py")
-    elif mcp_type == "use-aws":
-        uninstaller_path = os.path.join(script_dir, "runtime_mcp", "iam_auth", "use-aws", "uninstaller.py")
-    else:
-        logger.error(f"Unknown MCP Runtime type: {mcp_type}")
-        return False
-    
-    if not os.path.exists(uninstaller_path):
-        logger.error(f"Uninstaller not found: {uninstaller_path}")
-        return False
-    
-    try:
-        logger.info(f"Running uninstaller: {uninstaller_path}")
-        result = subprocess.run(
-            [sys.executable, uninstaller_path, "--yes"],
-            cwd=os.path.dirname(uninstaller_path),
-            check=False,
-            capture_output=False
-        )
-        if result.returncode == 0:
-            logger.info(f"✓ MCP Runtime ({mcp_type}) uninstallation completed")
-            return True
-        else:
-            logger.warning(f"MCP Runtime ({mcp_type}) uninstallation completed with warnings (exit code: {result.returncode})")
-            return True  # Continue even if there are warnings
-    except subprocess.CalledProcessError as e:
-        logger.error(f"Failed to uninstall MCP Runtime ({mcp_type}): {e}")
-        return False
-    except Exception as e:
-        logger.error(f"Error uninstalling MCP Runtime ({mcp_type}): {e}")
-        return False
-
 def main():
     """Main function to delete all infrastructure."""
     parser = argparse.ArgumentParser(description="AWS Infrastructure Uninstaller")
@@ -1929,16 +1889,11 @@ def main():
         delete_s3_buckets()
         delete_disabled_cloudfront_distributions()
         
-        # Uninstall agent runtime and mcp runtimes
-        # These should be uninstalled before other resources are deleted
-        uninstall_agent_runtime("langgraph")
-        logger.info(f"Langgraph agent runtime uninstalled...")
-        
-        uninstall_mcp_runtime("kb-retriever")
-        logger.info(f"Kb-retriever mcp runtime uninstalled...")
-        
-        uninstall_mcp_runtime("use-aws")
-        logger.info(f"Use-aws mcp runtime uninstalled...")
+        # Uninstall agent runtime (MCP servers are in-process in the LangGraph container).
+        if uninstall_agent_runtime("langgraph"):
+            logger.info("Langgraph agent runtime uninstalled...")
+        else:
+            logger.warning("Langgraph agent runtime uninstall failed or was skipped.")
         
         # Retry VPC deletion only if there were failures
         if failed_vpcs:

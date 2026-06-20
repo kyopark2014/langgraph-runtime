@@ -4752,43 +4752,6 @@ def install_agent_runtime(runtime_type: str = "langgraph") -> bool:
         return False
 
 
-def install_mcp_runtime(mcp_type: str) -> bool:
-    """Install MCP Runtime by running the appropriate installer.py script."""
-    logger.info(f"[11/10] Installing MCP Runtime: {mcp_type}")
-    
-    # Determine installer path based on MCP type
-    script_dir = os.path.dirname(os.path.abspath(__file__))
-    
-    if mcp_type == "kb-retriever":
-        installer_path = os.path.join(script_dir, "runtime_mcp", "iam_auth", "kb-retriever", "installer.py")
-    elif mcp_type == "use-aws":
-        installer_path = os.path.join(script_dir, "runtime_mcp", "iam_auth", "use-aws", "installer.py")
-    else:
-        logger.error(f"Unknown MCP Runtime type: {mcp_type}")
-        return False
-    
-    if not os.path.exists(installer_path):
-        logger.error(f"Installer not found: {installer_path}")
-        return False
-    
-    try:
-        logger.info(f"Running installer: {installer_path}")
-        result = subprocess.run(
-            [sys.executable, installer_path],
-            cwd=os.path.dirname(installer_path),
-            check=True,
-            capture_output=False
-        )
-        logger.info(f"✓ MCP Runtime ({mcp_type}) installation completed")
-        return True
-    except subprocess.CalledProcessError as e:
-        logger.error(f"Failed to install MCP Runtime ({mcp_type}): {e}")
-        return False
-    except Exception as e:
-        logger.error(f"Error installing MCP Runtime ({mcp_type}): {e}")
-        return False
-
-
 def check_application_ready(domain: str, max_attempts: int = 120, wait_seconds: int = 10) -> None:
     """Check if the application is ready by making HTTP requests to the CloudFront domain.
     
@@ -4887,11 +4850,6 @@ def main():
         const="langgraph",
         help="Install Agent Runtime. RUNTIME_TYPE can be 'langgraph' (default)."
     )
-    parser.add_argument(
-        "--install-mcp-runtime",
-        metavar="MCP_TYPE",
-        help="Install MCP Runtime. MCP_TYPE can be 'kb-retriever' or 'use-aws'."
-    )
     
     args = parser.parse_args()
     
@@ -4910,11 +4868,6 @@ def main():
     if args.install_agent_runtime is not None:
         runtime_type = args.install_agent_runtime if args.install_agent_runtime else "langgraph"
         success = install_agent_runtime(runtime_type)
-        sys.exit(0 if success else 1)
-    
-    # If --install-mcp-runtime flag is provided, install MCP Runtime
-    if args.install_mcp_runtime:
-        success = install_mcp_runtime(args.install_mcp_runtime)
         sys.exit(0 if success else 1)
     
     logger.info("="*60)
@@ -4993,13 +4946,12 @@ def main():
             logger.info("Local testing is available while deployment continues:")
             logger.info("  streamlit run application/app.py")
 
-        # Install AgentCore / MCP runtimes after CloudFront so config.json gets sharing_url
-        install_agent_runtime("langgraph")
-        logger.info("Langgraph agent runtime installed...")
-        install_mcp_runtime("kb-retriever")
-        logger.info("Kb-retriever mcp runtime installed...")
-        install_mcp_runtime("use-aws")
-        logger.info("Use-aws mcp runtime installed...")
+        # LangGraph agent runtime (MCP servers run in-process inside this container;
+        # separate runtime_mcp installers are not used in this repository).
+        if install_agent_runtime("langgraph"):
+            logger.info("Langgraph agent runtime installed...")
+        else:
+            logger.warning("Langgraph agent runtime installation failed or was skipped.")
 
         repository_uri = create_ecr_repository()
         image_build_tag = None
