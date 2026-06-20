@@ -553,8 +553,16 @@ AgentCore Runtime에서 대화 history를 유지하려면 **managed session stor
 - [AgentCore quotas (session storage limits)](https://docs.aws.amazon.com/bedrock-agentcore/latest/devguide/bedrock-agentcore-limits.html)
 
 
+
+
 ## 배포하기
 
+AWS console의 CloudShell을 접속합니다. 이후 아래와 같이 python, pip, git, boto3를 설치합니다.
+
+```text
+sudo yum install python3 python3-pip git docker -y
+pip install boto3
+```
 
 아래와 같이 git source를 가져옵니다.
 
