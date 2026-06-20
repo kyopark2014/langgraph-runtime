@@ -14,7 +14,7 @@ import argparse
 from botocore.exceptions import ClientError
 
 # Configuration
-project_name = "agent-runtime"
+project_name = "langgraph-runtime"
 region = "us-west-2"
 AGENTCORE_GATEWAY_REGION = "us-east-1"
 AGENTCORE_WEBSEARCH_GATEWAY_NAME = "gateway-websearch"
@@ -30,6 +30,7 @@ ec2_client = boto3.client("ec2", region_name=region)
 elbv2_client = boto3.client("elbv2", region_name=region)
 cloudfront_client = boto3.client("cloudfront", region_name=region)
 bedrock_agent_client = boto3.client("bedrock-agent", region_name=region)
+s3vectors_client = boto3.client("s3vectors", region_name=region)
 ecs_client = boto3.client("ecs", region_name=region)
 ecr_client = boto3.client("ecr", region_name=region)
 logs_client = boto3.client("logs", region_name=region)
@@ -43,6 +44,8 @@ if not account_id:
     account_id = sts_client.get_caller_identity()["Account"]
 
 bucket_name = f"storage-for-{project_name}-{account_id}-{region}"
+vector_index_name = project_name
+vector_bucket_name = f"{project_name}-{account_id}"
 
 # Configure logging
 def setup_logging():
@@ -1020,6 +1023,60 @@ def delete_knowledge_bases():
     except Exception as e:
         logger.error(f"Error deleting Knowledge Bases: {e}")
 
+
+def delete_s3_vectors_store():
+    """Delete S3 Vectors index and vector bucket created by installer.py."""
+    logger.info("[5.6/9] Deleting S3 Vectors store")
+
+    def _delete_vector_index() -> bool:
+        max_wait = 120
+        waited = 0
+        while waited <= max_wait:
+            try:
+                s3vectors_client.delete_index(
+                    vectorBucketName=vector_bucket_name,
+                    indexName=vector_index_name,
+                )
+                logger.info(f"  ✓ Deleted vector index: {vector_index_name}")
+                return True
+            except ClientError as e:
+                code = e.response["Error"]["Code"]
+                if code == "NotFoundException":
+                    logger.info(f"  Vector index not found: {vector_index_name}")
+                    return True
+                if code == "ConflictException" and waited < max_wait:
+                    logger.info(
+                        "  Vector index still in use; waiting for Knowledge Base cleanup..."
+                    )
+                    time.sleep(10)
+                    waited += 10
+                    continue
+                logger.warning(f"  Could not delete vector index {vector_index_name}: {e}")
+                return False
+        return False
+
+    try:
+        _delete_vector_index()
+
+        try:
+            s3vectors_client.delete_vector_bucket(
+                vectorBucketName=vector_bucket_name,
+            )
+            logger.info(f"  ✓ Deleted vector bucket: {vector_bucket_name}")
+        except ClientError as e:
+            code = e.response["Error"]["Code"]
+            if code == "NotFoundException":
+                logger.info(f"  Vector bucket not found: {vector_bucket_name}")
+            else:
+                logger.warning(
+                    f"  Could not delete vector bucket {vector_bucket_name}: {e}"
+                )
+
+        logger.info("✓ S3 Vectors store deleted")
+    except Exception as e:
+        logger.error(f"Error deleting S3 Vectors store: {e}")
+
+
 def delete_security_groups():
     """Delete security groups with proper dependency handling."""
     logger.info("[4/9] Deleting security groups")
@@ -1882,6 +1939,7 @@ def main():
         
         delete_opensearch_collection()
         delete_knowledge_bases()
+        delete_s3_vectors_store()
         agentcore_gateway_deleted = delete_agentcore_websearch_gateway(
             skip_confirmation=args.delete_agentcore_gateway
         )
