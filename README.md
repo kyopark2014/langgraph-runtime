@@ -557,12 +557,24 @@ AgentCore Runtime에서 대화 history를 유지하려면 **managed session stor
 
 ## 배포하기
 
-AWS console의 CloudShell을 접속합니다. 이후 아래와 같이 python, pip, git, boto3를 설치합니다.
+AWS console에서 EC2를 기본값으로 생성합니다. 이후 EC2에 [EC2 Instance Connect]로 접속해서 아래와 같이 python, pip, git, boto3를 설치합니다.
 
 ```text
-sudo yum install python3 python3-pip git docker -y
-pip install boto3
+sudo yum install python3 python3-pip git 
+pip install boto3 
 ```
+
+아래 명령어로 docker를 설치합니다.
+
+```bash
+sudo yum install -y docker
+sudo systemctl start docker
+sudo systemctl enable docker
+sudo usermod -aG docker ec2-user
+newgrp docker
+docker info
+```
+
 
 아래와 같이 git source를 가져옵니다.
 
