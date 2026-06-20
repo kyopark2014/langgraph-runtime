@@ -231,7 +231,7 @@ sequenceDiagram
 
 ### 주의사항
 
-- **세션 범위**: `/mnt/workspace`는 `runtimeSessionId` 수명에 묶인 **임시 저장소**입니다. 세션이 종료되면 데이터가 사라질 수 있습니다. 장기 보관이 필요하면 S3, DynamoDB, RDS 등을 별도로 고려하세요.
+- **세션 범위**: `/mnt/workspace`는 `runtimeSessionId` 수명에 묶인 **임시 저장소**입니다. 일반적으로 세션이 종료되면 데이터가 사라지지만, AgentCore를 사용할 경우에는 14일간 보관이 됩니다. 추가 입력이 있을 경우에 기간은 다시 14일로 갱신됩니다. 세션당 최대 1MB까지 저장합니다. 다른 방법으로 S3, DynamoDB, RDS 등을 별도로 설정할 수 있습니다.
 - **요청마다 agent 재생성**: `agent.py`는 매 요청 `create_agent()`를 호출하지만, checkpointer가 파일에 있으면 `thread_id`만 같으면 history를 복원합니다.
 - **`InMemoryStore`는 휘발성**: `store=chat.memorystore`는 LangGraph Store API용이며 메모리에만 있습니다. 대화 history만 필요하면 checkpointer만으로 충분합니다.
 - **의존성**: [runtime_agent/langgraph/Dockerfile](./runtime_agent/langgraph/Dockerfile)에 `langgraph-checkpoint-sqlite`, `aiosqlite`가 포함되어 있습니다.
