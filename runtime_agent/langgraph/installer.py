@@ -131,25 +131,6 @@ def _find_data_source_id(bedrock_agent_client, knowledge_base_id: str, s3_bucket
         return ""
 
 
-def _load_tavily_api_key_from_secrets(knowledge_base_name: str, region: str) -> str:
-    """Load Tavily API key from Secrets Manager."""
-    secret_names = [
-        f"tavilyapikey-{knowledge_base_name}",
-    ]
-    secrets_client = boto3.client("secretsmanager", region_name=region)
-    for secret_name in secret_names:
-        try:
-            response = secrets_client.get_secret_value(SecretId=secret_name)
-            secret_data = json.loads(response["SecretString"])
-            api_key = secret_data.get("tavily_api_key", "")
-            if api_key:
-                print(f"  ✓ Tavily API key loaded from Secrets Manager: {secret_name}")
-                return api_key
-        except ClientError as e:
-            print(f"  Warning: Could not load Tavily secret {secret_name}: {e}")
-    return ""
-
-
 def update_knowledge_base_config() -> bool:
     """Look up Knowledge Base by root installer project_name and update config.json."""
     print(f"\n{'='*60}")
@@ -196,9 +177,6 @@ def update_knowledge_base_config() -> bool:
             ):
                 if app_config.get(key):
                     updates[key] = app_config[key]
-            tavily_api_key = _load_tavily_api_key_from_secrets(knowledge_base_name, region)
-            if tavily_api_key:
-                updates["tavily_api_key"] = tavily_api_key
             config.update(updates)
             with open(config_path, "w", encoding="utf-8") as f:
                 json.dump(config, f, indent=2)
@@ -207,8 +185,6 @@ def update_knowledge_base_config() -> bool:
                 print(f"  - knowledge_base_id: {updates['knowledge_base_id']}")
             else:
                 print("✓ config.json updated with knowledge_base_name only")
-            if updates.get("tavily_api_key"):
-                print("  - tavily_api_key: configured")
             return True
 
         kb_details = bedrock_agent_client.get_knowledge_base(knowledgeBaseId=knowledge_base_id)
@@ -266,10 +242,6 @@ def update_knowledge_base_config() -> bool:
                 s3_bucket_name,
             )
 
-        tavily_api_key = _load_tavily_api_key_from_secrets(knowledge_base_name, region)
-        if tavily_api_key:
-            updates["tavily_api_key"] = tavily_api_key
-
         config.update(updates)
         with open(config_path, "w", encoding="utf-8") as f:
             json.dump(config, f, indent=2)
@@ -280,8 +252,6 @@ def update_knowledge_base_config() -> bool:
             print(f"  - data_source_id: {updates['data_source_id']}")
         if updates.get("vector_index_arn"):
             print(f"  - vector_index_arn: {updates['vector_index_arn']}")
-        if updates.get("tavily_api_key"):
-            print("  - tavily_api_key: configured")
         return True
     except Exception as e:
         print(f"Error updating Knowledge Base configuration: {e}")
@@ -347,7 +317,6 @@ def create_bedrock_agentcore_policy(config):
                 "Resource": [
                     f"arn:aws:secretsmanager:{region}:*:secret:{projectName}/cognito/credentials*",
                     f"arn:aws:secretsmanager:{region}:*:secret:{projectName}/credentials*",
-                    f"arn:aws:secretsmanager:{region}:*:secret:tavilyapikey-*",
                 ]
             },
             {

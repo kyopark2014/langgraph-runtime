@@ -58,34 +58,25 @@ def load_config(mcp_type):
     elif mcp_type == "image generation":
         mcp_type = "image_generation"
     
-    if mcp_type == "tavily":
+    if mcp_type == "aws_documentation":
         return {
             "mcpServers": {
-                "tavily-search": {
-                    "command": "python",
-                    "args": [
-                        f"{workingDir}/mcp_server_tavily.py"
-                    ]
+                "awslabs.aws-documentation-mcp-server": {
+                    "command": "uvx",
+                    "args": ["awslabs.aws-documentation-mcp-server@latest"],
+                    "env": {
+                        "FASTMCP_LOG_LEVEL": "ERROR"
+                    }
                 }
             }
         }
-    
+
     elif mcp_type == "korea_weather":
         return {
             "mcpServers": {
                 "korea-weather": {
                     "command": "python",
                     "args": [f"{workingDir}/mcp_server_korea_weather.py"]
-                }
-            }
-        }
-
-    elif mcp_type == "noaa":
-        return {
-            "mcpServers": {
-                "noaa-energy-news": {
-                    "command": "python",
-                    "args": [f"{workingDir}/mcp_server_noaa.py"],
                 }
             }
         }
@@ -103,19 +94,6 @@ def load_config(mcp_type):
             }
         }
     
-    elif mcp_type == "aws_documentation":
-        return {
-            "mcpServers": {
-                "awslabs.aws-documentation-mcp-server": {
-                    "command": "uvx",
-                    "args": ["awslabs.aws-documentation-mcp-server@latest"],
-                    "env": {
-                        "FASTMCP_LOG_LEVEL": "ERROR"
-                    }
-                }
-            }
-        }
-
     elif mcp_type == "trade_info":
         return {
             "mcpServers": {

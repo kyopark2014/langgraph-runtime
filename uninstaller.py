@@ -1024,12 +1024,13 @@ def delete_knowledge_bases():
 def delete_secrets():
     """Delete Secrets Manager secrets."""
     logger.info("[6/9] Deleting secrets")
-    
-    secret_names = [
-        f"openweathermap-{project_name}",
-        f"tavilyapikey-{project_name}"
-    ]
-    
+
+    secret_names = []
+
+    if not secret_names:
+        logger.info("  No secrets configured for deletion")
+        return
+
     for secret_name in secret_names:
         try:
             secrets_client.delete_secret(
