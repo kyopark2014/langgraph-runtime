@@ -197,7 +197,7 @@ def update_knowledge_base_config() -> bool:
             "collectionArn": "",
             "opensearch_url": "",
         }
-
+ 
         storage = knowledge_base.get("storageConfiguration", {})
         storage_type = storage.get("type", "")
         if storage_type == "S3_VECTORS":
