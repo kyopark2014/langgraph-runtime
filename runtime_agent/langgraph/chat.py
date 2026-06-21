@@ -1438,6 +1438,7 @@ async def create_agent(mcp_servers: list, skill_list: list, history_mode: str="D
                 "tools": tools,
                 "system_prompt": system_prompt,
             },
+            "max_turns": langgraph_agent.MAX_CONTEXT_TURNS,
         }
     else:
         app = langgraph_agent.buildChatAgent(tools)
@@ -1448,6 +1449,7 @@ async def create_agent(mcp_servers: list, skill_list: list, history_mode: str="D
                 "tools": tools,
                 "system_prompt": system_prompt,
             },
+            "max_turns": langgraph_agent.MAX_CONTEXT_TURNS,
         }        
     
     return app, config
