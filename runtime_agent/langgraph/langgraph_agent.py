@@ -722,29 +722,6 @@ def buildChatAgentWithHistory(tools):
 
     return workflow.compile(checkpointer=chat.checkpointer)
 
-_MCP_SUBPROCESS_ENV_KEYS = frozenset({
-    "TAVILY_API_KEY",
-    "NOTION_API_KEY",
-    "SLACK_BOT_TOKEN",
-    "SLACK_TEAM_ID",
-    "TELEGRAM_API_KEY",
-    "DISCORD_BOT_TOKEN",
-    "APP_CONFIG_JSON",
-})
-
-
-def _build_mcp_subprocess_env(extra_env: dict | None = None) -> dict[str, str]:
-    """Propagate ECS task credentials and API keys to MCP stdio subprocesses."""
-    env = {
-        key: value
-        for key, value in os.environ.items()
-        if key.startswith("AWS_") or key in _MCP_SUBPROCESS_ENV_KEYS
-    }
-    if extra_env:
-        env.update(extra_env)
-    return env
-
-
 def load_multiple_mcp_server_parameters(mcp_json: dict):
     mcpServers = mcp_json.get("mcpServers")
   
@@ -764,11 +741,15 @@ def load_multiple_mcp_server_parameters(mcp_json: dict):
                     )
                 server_info[server_name] = connection
             else:
+                command = config.get("command", "")
+                args = config.get("args", [])
+                env = config.get("env", {})
+                
                 server_info[server_name] = {
                     "transport": "stdio",
-                    "command": config.get("command", ""),
-                    "args": config.get("args", []),
-                    "env": _build_mcp_subprocess_env(config.get("env")),
+                    "command": command,
+                    "args": args,
+                    "env": env                    
                 }
     return server_info
 
