@@ -3907,6 +3907,48 @@ def create_ecs_log_group() -> str:
     return log_group_name
 
 
+ECS_SERVICE_LINKED_ROLE_NAME = "AWSServiceRoleForECS"
+
+
+def ensure_ecs_service_linked_role() -> None:
+    """Ensure the ECS service-linked role exists.
+
+    ECS requires AWSServiceRoleForECS when creating Fargate services with
+    awvpc networking and Application Load Balancer target groups.
+    """
+    logger.debug(f"Checking ECS service-linked role: {ECS_SERVICE_LINKED_ROLE_NAME}")
+    try:
+        iam_client.get_role(RoleName=ECS_SERVICE_LINKED_ROLE_NAME)
+        logger.info(f"  ✓ ECS service-linked role already exists: {ECS_SERVICE_LINKED_ROLE_NAME}")
+        return
+    except ClientError as e:
+        if e.response["Error"]["Code"] != "NoSuchEntity":
+            raise
+
+    logger.info("  Creating ECS service-linked role...")
+    try:
+        iam_client.create_service_linked_role(
+            AWSServiceName="ecs.amazonaws.com",
+            Description="Service-linked role for Amazon ECS.",
+        )
+        logger.info(f"  ✓ Created ECS service-linked role: {ECS_SERVICE_LINKED_ROLE_NAME}")
+        # IAM propagation can take a few seconds before ECS can assume the role.
+        time.sleep(10)
+    except ClientError as e:
+        error_code = e.response["Error"]["Code"]
+        error_message = e.response["Error"].get("Message", str(e))
+        if error_code == "InvalidInputException" and "has been taken" in error_message:
+            logger.warning(f"  ECS service-linked role already exists: {ECS_SERVICE_LINKED_ROLE_NAME}")
+            return
+        if error_code in {"AccessDenied", "AccessDeniedException"}:
+            raise PermissionError(
+                "Missing iam:CreateServiceLinkedRole permission. Create the ECS "
+                "service-linked role manually, then rerun the installer:\n"
+                "  aws iam create-service-linked-role --aws-service-name ecs.amazonaws.com"
+            ) from e
+        raise
+
+
 def create_ecs_cluster() -> str:
     """Create ECS cluster."""
     cluster_name = f"cluster-for-{project_name}"
@@ -4083,6 +4125,8 @@ def deploy_ecs_service(
 ) -> Dict[str, str]:
     """Create ECS task definition and Fargate service behind the ALB."""
     logger.info("[9/10] Deploying ECS Fargate service")
+
+    ensure_ecs_service_linked_role()
 
     if not vpc_info.get("ecs_sg_id"):
         raise ValueError(
