@@ -1326,9 +1326,15 @@ def create_agent_runtime():
         if not resolved_runtime_id and agent_runtime_arn:
             resolved_runtime_id = agent_runtime_arn.rsplit("/", 1)[-1]
 
-        if resolved_runtime_id:
-            verify_session_storage_config(client, resolved_runtime_id, config)
-        
+        if resolved_runtime_id and not verify_session_storage_config(
+            client, resolved_runtime_id, config
+        ):
+            print(
+                "Error: session storage filesystem configuration missing on agent runtime. "
+                "Re-run this installer after confirming s3_files_access_point_arn in config.json."
+            )
+            return False
+
         # Update config.json
         update_agentcore_json(agent_runtime_arn, image_tag)
         
