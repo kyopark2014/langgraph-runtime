@@ -443,6 +443,7 @@ def create_bedrock_agentcore_policy(config):
                     "Action": [
                         "s3files:ClientMount",
                         "s3files:ClientWrite",
+                        "s3files:ClientRootAccess",
                     ],
                     "Resource": file_system_arn,
                     "Condition": {

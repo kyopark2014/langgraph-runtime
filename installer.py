@@ -5232,6 +5232,7 @@ def _ensure_s3files_file_system_policy(
                 "Action": [
                     "s3files:ClientMount",
                     "s3files:ClientWrite",
+                    "s3files:ClientRootAccess",
                 ],
                 "Condition": {
                     "StringEquals": {

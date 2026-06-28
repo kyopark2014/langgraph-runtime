@@ -35,7 +35,7 @@ def load_capability_list(filename: str) -> list:
 os.environ["DEV"] = "true"  # Skip user confirmation of get_user_input
 
 # title
-st.set_page_config(page_title='AgentCore', page_icon=None, layout="centered", initial_sidebar_state="auto", menu_items=None)
+st.set_page_config(page_title='LangGraph', page_icon=None, layout="centered", initial_sidebar_state="auto", menu_items=None)
 
 
 @st.dialog("User ID 입력")
