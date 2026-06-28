@@ -65,6 +65,9 @@ agentcore_control_client = boto3.client(
     "bedrock-agentcore-control",
     region_name=AGENTCORE_GATEWAY_REGION,
 )
+s3files_client = boto3.client("s3files", region_name=region)
+
+S3_FILES_SESSION_PREFIX = "agentcore-sessions/"
 
 bucket_name = f"storage-for-{project_name}-{account_id}-{region}"
 
@@ -148,11 +151,11 @@ def create_s3_bucket() -> str:
             CORSConfiguration=cors_configuration
         )
         
-        # Enable versioning (set to false means suspend)
-        logger.debug("Configuring versioning")
+        # S3 Files requires bucket versioning to be Enabled.
+        logger.debug("Enabling bucket versioning")
         s3_client.put_bucket_versioning(
             Bucket=bucket_name,
-            VersioningConfiguration={"Status": "Suspended"}
+            VersioningConfiguration={"Status": "Enabled"}
         )
         
         # Create docs folder
@@ -3589,6 +3592,7 @@ def build_config_from_deployment_state(
     s3_vectors_info: Optional[Dict[str, str]] = None,
     s3_bucket_name: Optional[str] = None,
     cloudfront_info: Optional[Dict[str, str]] = None,
+    s3_files_info: Optional[Dict[str, object]] = None,
 ) -> Dict[str, str]:
     """Build config.json payload from whatever deployment resources are available."""
     config_data: Dict[str, str] = {
@@ -3614,6 +3618,7 @@ def build_config_from_deployment_state(
         config_data["s3_arn"] = f"arn:aws:s3:::{s3_bucket_name}"
     if cloudfront_info:
         config_data["sharing_url"] = f"https://{cloudfront_info.get('domain', '')}"
+    config_data = apply_s3_files_config(config_data, s3_files_info)
     return _merge_runtime_agent_settings(config_data)
 
 
@@ -4927,6 +4932,439 @@ def verify_ec2_subnet_deployment():
     except Exception as e:
         logger.debug(f"Could not verify EC2 deployment: {e}")
 
+def _wait_for_s3files_status(
+    describe_fn,
+    resource_id_key: str,
+    resource_id: str,
+    ready_status: str = "available",
+    max_wait_seconds: int = 600,
+    poll_seconds: int = 10,
+) -> bool:
+    """Poll an S3 Files resource until it reaches the expected status."""
+    deadline = time.time() + max_wait_seconds
+    while time.time() < deadline:
+        response = describe_fn(**{resource_id_key: resource_id})
+        status = (response.get("status") or "").lower()
+        if status == ready_status.lower():
+            return True
+        if status in {"error", "deleted"}:
+            message = response.get("statusMessage", "")
+            raise RuntimeError(
+                f"S3 Files resource {resource_id} entered status {status}: {message}"
+            )
+        time.sleep(poll_seconds)
+    raise TimeoutError(f"Timed out waiting for S3 Files resource {resource_id}")
+
+
+def _get_or_create_s3files_sync_role(s3_bucket_arn: str) -> str:
+    """Create the IAM role S3 Files assumes to sync with the backing S3 bucket."""
+    role_name = f"role-s3files-sync-for-{project_name}"
+    trust_policy = {
+        "Version": "2012-10-17",
+        "Statement": [
+            {
+                "Sid": "AllowS3FilesAssumeRole",
+                "Effect": "Allow",
+                "Principal": {"Service": "elasticfilesystem.amazonaws.com"},
+                "Action": "sts:AssumeRole",
+                "Condition": {
+                    "StringEquals": {"aws:SourceAccount": account_id},
+                    "ArnLike": {
+                        "aws:SourceArn": (
+                            f"arn:aws:s3files:{region}:{account_id}:file-system/*"
+                        )
+                    },
+                },
+            }
+        ],
+    }
+    bucket_policy = {
+        "Version": "2012-10-17",
+        "Statement": [
+            {
+                "Effect": "Allow",
+                "Action": [
+                    "s3:ListBucket",
+                    "s3:ListBucketVersions",
+                    "s3:GetBucketLocation",
+                    "s3:GetBucketVersioning",
+                    "s3:AbortMultipartUpload",
+                    "s3:ListMultipartUploadParts",
+                    "s3:GetObject",
+                    "s3:GetObjectVersion",
+                    "s3:GetObjectTagging",
+                    "s3:GetObjectVersionTagging",
+                    "s3:PutObject",
+                    "s3:PutObjectTagging",
+                    "s3:DeleteObject",
+                    "s3:DeleteObjectVersion",
+                ],
+                "Resource": [s3_bucket_arn, f"{s3_bucket_arn}/*"],
+                "Condition": {
+                    "StringEquals": {"aws:ResourceAccount": account_id}
+                },
+            }
+        ],
+    }
+    eventbridge_policy = {
+        "Version": "2012-10-17",
+        "Statement": [
+            {
+                "Sid": "EventBridgeManage",
+                "Effect": "Allow",
+                "Action": [
+                    "events:PutRule",
+                    "events:PutTargets",
+                    "events:DeleteRule",
+                    "events:DisableRule",
+                    "events:EnableRule",
+                    "events:RemoveTargets",
+                ],
+                "Resource": "arn:aws:events:*:*:rule/DO-NOT-DELETE-S3-Files*",
+                "Condition": {
+                    "StringEquals": {
+                        "events:ManagedBy": "elasticfilesystem.amazonaws.com"
+                    }
+                },
+            },
+            {
+                "Sid": "EventBridgeRead",
+                "Effect": "Allow",
+                "Action": [
+                    "events:DescribeRule",
+                    "events:ListRules",
+                    "events:ListRuleNamesByTarget",
+                    "events:ListTargetsByRule",
+                ],
+                "Resource": "arn:aws:events:*:*:rule/*",
+            },
+        ],
+    }
+
+    try:
+        role = iam_client.get_role(RoleName=role_name)
+        role_arn = role["Role"]["Arn"]
+        iam_client.update_assume_role_policy(
+            RoleName=role_name,
+            PolicyDocument=json.dumps(trust_policy),
+        )
+        logger.info(f"  Reusing S3 Files sync role: {role_arn}")
+    except iam_client.exceptions.NoSuchEntityException:
+        role = iam_client.create_role(
+            RoleName=role_name,
+            AssumeRolePolicyDocument=json.dumps(trust_policy),
+            Description=f"S3 Files sync role for {project_name}",
+        )
+        role_arn = role["Role"]["Arn"]
+        logger.info(f"  Created S3 Files sync role: {role_arn}")
+
+    for policy_name, policy_document in (
+        ("s3-bucket-access", bucket_policy),
+        ("eventbridge-sync", eventbridge_policy),
+    ):
+        iam_client.put_role_policy(
+            RoleName=role_name,
+            PolicyName=policy_name,
+            PolicyDocument=json.dumps(policy_document),
+        )
+
+    return role_arn
+
+
+def _find_s3files_file_system_for_bucket(s3_bucket_arn: str) -> Optional[Dict[str, str]]:
+    """Return an existing S3 Files file system for the bucket, if any."""
+    paginator = s3files_client.get_paginator("list_file_systems")
+    for page in paginator.paginate():
+        for item in page.get("fileSystems", []):
+            if item.get("bucket") == s3_bucket_arn:
+                return {
+                    "file_system_id": item.get("fileSystemId", ""),
+                    "file_system_arn": item.get("fileSystemArn", ""),
+                }
+    return None
+
+
+def _ensure_s3_bucket_versioning_enabled(s3_bucket_name: str) -> None:
+    """Enable S3 bucket versioning (required for S3 Files file systems)."""
+    response = s3_client.get_bucket_versioning(Bucket=s3_bucket_name)
+    status = response.get("Status")
+    if status == "Enabled":
+        logger.info(f"  S3 bucket versioning already enabled: {s3_bucket_name}")
+        return
+
+    logger.info(f"  Enabling S3 bucket versioning for S3 Files: {s3_bucket_name}")
+    s3_client.put_bucket_versioning(
+        Bucket=s3_bucket_name,
+        VersioningConfiguration={"Status": "Enabled"},
+    )
+
+
+def _get_or_create_s3files_file_system(s3_bucket_arn: str, role_arn: str) -> Dict[str, str]:
+    """Create or reuse an S3 Files file system scoped to the session prefix."""
+    existing = _find_s3files_file_system_for_bucket(s3_bucket_arn)
+    if existing and existing.get("file_system_id"):
+        logger.info(f"  Reusing S3 Files file system: {existing['file_system_id']}")
+        return existing
+
+    bucket_name = s3_bucket_arn.removeprefix("arn:aws:s3:::")
+    _ensure_s3_bucket_versioning_enabled(bucket_name)
+
+    response = s3files_client.create_file_system(
+        bucket=s3_bucket_arn,
+        prefix=S3_FILES_SESSION_PREFIX,
+        roleArn=role_arn,
+        acceptBucketWarning=True,
+        tags=[{"key": "Name", "value": f"s3files-for-{project_name}"}],
+    )
+    file_system_id = response["fileSystemId"]
+    logger.info(f"  Created S3 Files file system: {file_system_id}")
+    _wait_for_s3files_status(
+        s3files_client.get_file_system,
+        "fileSystemId",
+        file_system_id,
+    )
+    return {
+        "file_system_id": file_system_id,
+        "file_system_arn": response.get("fileSystemArn", ""),
+    }
+
+
+def _get_or_create_s3files_mount_security_group(
+    vpc_id: str,
+    agent_runtime_sg_id: str,
+) -> str:
+    """Security group for S3 Files mount targets (NFS 2049)."""
+    group_name = f"s3files-mount-sg-for-{project_name}"
+    ingress_rules = [
+        {
+            "IpProtocol": "tcp",
+            "FromPort": 2049,
+            "ToPort": 2049,
+            "UserIdGroupPairs": [{"GroupId": agent_runtime_sg_id}],
+        }
+    ]
+    sg_id = create_security_group(
+        vpc_id=vpc_id,
+        group_name=group_name,
+        description=f"S3 Files mount target security group for {project_name}",
+        ingress_rules=ingress_rules,
+    )
+    return sg_id
+
+
+def _ensure_s3files_mount_targets(
+    file_system_id: str,
+    subnet_ids: List[str],
+    security_group_ids: List[str],
+) -> None:
+    """Create mount targets in each private subnet that does not have one yet."""
+    existing_subnets = set()
+    paginator = s3files_client.get_paginator("list_mount_targets")
+    for page in paginator.paginate(fileSystemId=file_system_id):
+        for item in page.get("mountTargets", []):
+            if item.get("subnetId"):
+                existing_subnets.add(item["subnetId"])
+
+    for subnet_id in subnet_ids:
+        if subnet_id in existing_subnets:
+            logger.info(f"  Reusing S3 Files mount target in subnet {subnet_id}")
+            continue
+
+        response = s3files_client.create_mount_target(
+            fileSystemId=file_system_id,
+            subnetId=subnet_id,
+            securityGroups=security_group_ids,
+        )
+        mount_target_id = response.get("mountTargetId", subnet_id)
+        logger.info(f"  Created S3 Files mount target {mount_target_id} in {subnet_id}")
+        _wait_for_s3files_status(
+            s3files_client.get_mount_target,
+            "mountTargetId",
+            mount_target_id,
+        )
+
+
+def _get_or_create_s3files_access_point(file_system_id: str) -> str:
+    """Create or reuse an access point for AgentCore session storage."""
+    paginator = s3files_client.get_paginator("list_access_points")
+    for page in paginator.paginate(fileSystemId=file_system_id):
+        for item in page.get("accessPoints", []):
+            arn = item.get("accessPointArn")
+            if arn:
+                logger.info(f"  Reusing S3 Files access point: {arn}")
+                return arn
+
+    response = s3files_client.create_access_point(
+        fileSystemId=file_system_id,
+        posixUser={"uid": 0, "gid": 0},
+        rootDirectory={
+            "path": "/",
+            "creationPermissions": {
+                "ownerUid": 0,
+                "ownerGid": 0,
+                "permissions": "0777",
+            },
+        },
+        tags=[{"key": "Name", "value": f"s3files-ap-for-{project_name}"}],
+    )
+    access_point_arn = response["accessPointArn"]
+    logger.info(f"  Created S3 Files access point: {access_point_arn}")
+    _wait_for_s3files_status(
+        s3files_client.get_access_point,
+        "accessPointId",
+        response["accessPointId"],
+    )
+    return access_point_arn
+
+
+def _ensure_s3files_file_system_policy(
+    file_system_id: str,
+    access_point_arn: str,
+    agent_runtime_role_arn: str,
+) -> None:
+    """Allow the AgentCore runtime role to mount and write via the access point."""
+    policy = {
+        "Version": "2012-10-17",
+        "Statement": [
+            {
+                "Effect": "Allow",
+                "Principal": {"AWS": agent_runtime_role_arn},
+                "Action": [
+                    "s3files:ClientMount",
+                    "s3files:ClientWrite",
+                ],
+                "Condition": {
+                    "StringEquals": {
+                        "s3files:AccessPointArn": access_point_arn,
+                    }
+                },
+            }
+        ],
+    }
+    try:
+        s3files_client.put_file_system_policy(
+            fileSystemId=file_system_id,
+            policy=json.dumps(policy),
+        )
+        logger.info("  Applied S3 Files file system policy for AgentCore runtime role")
+    except ClientError as e:
+        logger.warning(f"  Could not apply S3 Files file system policy: {e}")
+
+
+def _add_security_group_to_vpc_endpoint(endpoint_id: str, security_group_id: str) -> None:
+    """Attach an additional security group to an interface VPC endpoint."""
+    if not endpoint_id:
+        return
+    try:
+        response = ec2_client.describe_vpc_endpoints(VpcEndpointIds=[endpoint_id])
+        endpoints = response.get("VpcEndpoints", [])
+        if not endpoints:
+            return
+        current_groups = endpoints[0].get("Groups", [])
+        group_ids = [group["GroupId"] for group in current_groups]
+        if security_group_id in group_ids:
+            return
+        group_ids.append(security_group_id)
+        ec2_client.modify_vpc_endpoint(
+            VpcEndpointId=endpoint_id,
+            AddSecurityGroupIds=[security_group_id],
+        )
+        logger.info(f"  Added {security_group_id} to VPC endpoint {endpoint_id}")
+    except ClientError as e:
+        logger.warning(f"  Could not update VPC endpoint {endpoint_id}: {e}")
+
+
+def create_s3_files_session_storage(
+    vpc_info: Dict[str, str],
+    s3_bucket_name: str,
+) -> Dict[str, object]:
+    """Provision S3 Files resources used as persistent AgentCore session storage."""
+    logger.info("[5.5/10] Creating S3 Files session storage")
+    vpc_id = vpc_info["vpc_id"]
+    private_subnets = vpc_info.get("private_subnets") or []
+    if len(private_subnets) < 1:
+        raise RuntimeError("At least one private subnet is required for S3 Files mount targets")
+
+    s3_bucket_arn = f"arn:aws:s3:::{s3_bucket_name}"
+    sync_role_arn = _get_or_create_s3files_sync_role(s3_bucket_arn)
+    file_system = _get_or_create_s3files_file_system(s3_bucket_arn, sync_role_arn)
+    file_system_id = file_system["file_system_id"]
+
+    # Create cross-referenced security groups for NFS between runtime and mount targets.
+    agent_runtime_sg_id = create_security_group(
+        vpc_id=vpc_id,
+        group_name=f"agent-runtime-sg-for-{project_name}",
+        description=f"Security group for AgentCore Runtime ({project_name})",
+    )
+    s3files_mount_sg_id = _get_or_create_s3files_mount_security_group(
+        vpc_id,
+        agent_runtime_sg_id,
+    )
+    try:
+        ec2_client.authorize_security_group_egress(
+            GroupId=agent_runtime_sg_id,
+            IpPermissions=[
+                {
+                    "IpProtocol": "tcp",
+                    "FromPort": 2049,
+                    "ToPort": 2049,
+                    "UserIdGroupPairs": [{"GroupId": s3files_mount_sg_id}],
+                }
+            ],
+        )
+    except ClientError as e:
+        if e.response["Error"]["Code"] != "InvalidPermission.Duplicate":
+            logger.warning(
+                f"  Could not add NFS egress on agent runtime security group: {e}"
+            )
+
+    _ensure_s3files_mount_targets(
+        file_system_id,
+        private_subnets,
+        [s3files_mount_sg_id],
+    )
+    access_point_arn = _get_or_create_s3files_access_point(file_system_id)
+    agent_runtime_role_arn = (
+        f"arn:aws:iam::{account_id}:role/AmazonBedrockAgentCoreRuntimeRoleFor{project_name}"
+    )
+    _ensure_s3files_file_system_policy(
+        file_system_id,
+        access_point_arn,
+        agent_runtime_role_arn,
+    )
+    _add_security_group_to_vpc_endpoint(
+        vpc_info.get("vpc_endpoint_id"),
+        agent_runtime_sg_id,
+    )
+
+    logger.info("✓ S3 Files session storage ready")
+    logger.info(f"  File system: {file_system_id}")
+    logger.info(f"  Access point: {access_point_arn}")
+    logger.info(f"  Runtime subnets: {', '.join(private_subnets)}")
+    logger.info(f"  Runtime security group: {agent_runtime_sg_id}")
+
+    return {
+        "file_system_id": file_system_id,
+        "access_point_arn": access_point_arn,
+        "subnets": private_subnets,
+        "security_groups": [agent_runtime_sg_id],
+    }
+
+
+def apply_s3_files_config(
+    app_config: Dict[str, object],
+    s3_files_info: Optional[Dict[str, object]],
+) -> Dict[str, object]:
+    """Attach S3 Files session storage settings to application config."""
+    if not s3_files_info:
+        return app_config
+    app_config["s3_files_file_system_id"] = s3_files_info.get("file_system_id", "")
+    app_config["s3_files_access_point_arn"] = s3_files_info.get("access_point_arn", "")
+    app_config["agent_runtime_vpc_subnets"] = s3_files_info.get("subnets", [])
+    app_config["agent_runtime_security_groups"] = s3_files_info.get("security_groups", [])
+    return app_config
+
+
 def install_agent_runtime(runtime_type: str = "langgraph") -> bool:
     """Install Agent Runtime by running the appropriate installer.py script."""
     logger.info(f"[11/10] Installing Agent Runtime: {runtime_type}")
@@ -5102,6 +5540,7 @@ def main():
     ecs_info = None
     app_environment = None
     agentcore_websearch_gateway_info = None
+    s3_files_info = None
     deployment_success = False
     
     try:
@@ -5151,6 +5590,10 @@ def main():
         # 5. Create VPC
         vpc_info = create_vpc()
         logger.info(f"VPC created...")
+
+        # 5.5. Create S3 Files session storage for AgentCore Runtime
+        s3_files_info = create_s3_files_session_storage(vpc_info, s3_bucket_name)
+        logger.info("S3 Files session storage created...")
         
         # 6. Create ALB
         alb_info = create_alb(vpc_info)
@@ -5171,6 +5614,7 @@ def main():
             data_source_id,
             agentcore_websearch_gateway_info,
         )
+        app_environment = apply_s3_files_config(app_environment, s3_files_info)
         if write_application_config(app_environment):
             logger.info("Local testing is available while deployment continues:")
             logger.info("  streamlit run application/app.py")
@@ -5244,6 +5688,11 @@ def main():
                 f"  AgentCore Web Search Gateway URL: "
                 f"{agentcore_websearch_gateway_info.get('gateway_url')}"
             )
+        if s3_files_info:
+            logger.info(f"  S3 Files Access Point: {s3_files_info.get('access_point_arn')}")
+            logger.info(
+                f"  Agent Runtime Subnets: {', '.join(s3_files_info.get('subnets', []))}"
+            )
         logger.info("")
         logger.info(f"Total deployment time: {elapsed_time/60:.2f} minutes")
         logger.info("="*60)
@@ -5289,6 +5738,7 @@ def main():
                 s3_vectors_info=s3_vectors_info,
                 s3_bucket_name=s3_bucket_name,
                 cloudfront_info=cloudfront_info,
+                s3_files_info=s3_files_info,
             )
 
         if s3_vectors_info:

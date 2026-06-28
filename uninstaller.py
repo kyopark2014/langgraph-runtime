@@ -10,6 +10,7 @@ import logging
 import subprocess
 import sys
 import os
+import json
 import argparse
 from botocore.exceptions import ClientError
 
@@ -38,6 +39,7 @@ agentcore_control_client = boto3.client(
     "bedrock-agentcore-control",
     region_name=AGENTCORE_GATEWAY_REGION,
 )
+s3files_client = boto3.client("s3files", region_name=region)
 
 # Get account ID if not set
 if not account_id:
@@ -1695,7 +1697,8 @@ def delete_iam_roles(delete_agentcore_gateway_role: bool = True):
         f"role-ecs-execution-for-{project_name}-{region}",
         f"role-ec2-for-{project_name}-{region}",
         f"role-lambda-rag-for-{project_name}-{region}",
-        f"role-agentcore-memory-for-{project_name}-{region}"
+        f"role-agentcore-memory-for-{project_name}-{region}",
+        f"role-s3files-sync-for-{project_name}",
     ]
     if delete_agentcore_gateway_role:
         role_names.append("role-agentcore-gateway-websearch-for-langgraph-runtime")
@@ -1843,6 +1846,189 @@ def retry_vpc_deletion():
     except Exception as e:
         logger.error(f"Error during VPC deletion retry: {e}")
 
+def _application_config_path() -> str:
+    script_dir = os.path.dirname(os.path.abspath(__file__))
+    return os.path.join(script_dir, "application", "config.json")
+
+
+def _load_application_config() -> dict:
+    config_path = _application_config_path()
+    if not os.path.isfile(config_path):
+        return {}
+    try:
+        with open(config_path, "r", encoding="utf-8") as handle:
+            return json.load(handle)
+    except (OSError, json.JSONDecodeError) as exc:
+        logger.warning(f"  Could not read {config_path}: {exc}")
+        return {}
+
+
+def _runtime_agent_config_path() -> str:
+    script_dir = os.path.dirname(os.path.abspath(__file__))
+    return os.path.join(script_dir, "runtime_agent", "langgraph", "config.json")
+
+
+def _is_s3files_not_found(error: ClientError) -> bool:
+    code = error.response.get("Error", {}).get("Code", "")
+    return code in {"ResourceNotFoundException", "NotFoundException", "NoSuchResource"}
+
+
+def _wait_for_s3files_resource_deleted(
+    describe_fn,
+    resource_id_key: str,
+    resource_id: str,
+    max_wait_seconds: int = 600,
+    poll_seconds: int = 10,
+) -> bool:
+    """Poll until describe returns not-found (resource fully deleted)."""
+    deadline = time.time() + max_wait_seconds
+    while time.time() < deadline:
+        try:
+            response = describe_fn(**{resource_id_key: resource_id})
+            status = (response.get("status") or "").lower()
+            if status in {"deleted", "deleting"}:
+                time.sleep(poll_seconds)
+                continue
+        except ClientError as error:
+            if _is_s3files_not_found(error):
+                return True
+            raise
+        time.sleep(poll_seconds)
+    logger.warning(f"  Timed out waiting for S3 Files resource deletion: {resource_id}")
+    return False
+
+
+def _find_s3files_file_system_id_for_bucket(s3_bucket_arn: str) -> str:
+    paginator = s3files_client.get_paginator("list_file_systems")
+    for page in paginator.paginate():
+        for item in page.get("fileSystems", []):
+            if item.get("bucket") == s3_bucket_arn:
+                return item.get("fileSystemId", "") or ""
+    return ""
+
+
+def _resolve_s3files_file_system_id() -> str:
+    app_config = _load_application_config()
+    file_system_id = app_config.get("s3_files_file_system_id") or ""
+    if file_system_id:
+        return file_system_id
+    return _find_s3files_file_system_id_for_bucket(f"arn:aws:s3:::{bucket_name}")
+
+
+def _delete_s3files_sync_role() -> None:
+    role_name = f"role-s3files-sync-for-{project_name}"
+    try:
+        inline_policies = iam_client.list_role_policies(RoleName=role_name)
+        for policy_name in inline_policies.get("PolicyNames", []):
+            iam_client.delete_role_policy(RoleName=role_name, PolicyName=policy_name)
+        iam_client.delete_role(RoleName=role_name)
+        logger.info(f"  ✓ Deleted S3 Files sync role: {role_name}")
+    except ClientError as error:
+        if error.response["Error"]["Code"] != "NoSuchEntity":
+            logger.warning(f"  Could not delete S3 Files sync role {role_name}: {error}")
+
+
+def delete_s3_files_session_storage() -> None:
+    """Delete S3 Files resources created for AgentCore session storage."""
+    logger.info("[3.6/10] Deleting S3 Files session storage")
+
+    file_system_id = _resolve_s3files_file_system_id()
+    if not file_system_id:
+        logger.info("  No S3 Files file system found for this deployment")
+        _delete_s3files_sync_role()
+        logger.info("✓ S3 Files session storage processed")
+        return
+
+    logger.info(f"  File system: {file_system_id}")
+
+    try:
+        s3files_client.delete_file_system_policy(fileSystemId=file_system_id)
+        logger.info("  ✓ Deleted S3 Files file system policy")
+    except ClientError as error:
+        if not _is_s3files_not_found(error):
+            logger.warning(f"  Could not delete S3 Files file system policy: {error}")
+
+    access_point_ids = []
+    try:
+        paginator = s3files_client.get_paginator("list_access_points")
+        for page in paginator.paginate(fileSystemId=file_system_id):
+            for item in page.get("accessPoints", []):
+                access_point_id = item.get("accessPointId")
+                if access_point_id:
+                    access_point_ids.append(access_point_id)
+    except ClientError as error:
+        logger.warning(f"  Could not list S3 Files access points: {error}")
+
+    for access_point_id in access_point_ids:
+        try:
+            s3files_client.delete_access_point(accessPointId=access_point_id)
+            _wait_for_s3files_resource_deleted(
+                s3files_client.get_access_point,
+                "accessPointId",
+                access_point_id,
+            )
+            logger.info(f"  ✓ Deleted S3 Files access point: {access_point_id}")
+        except ClientError as error:
+            if not _is_s3files_not_found(error):
+                logger.warning(f"  Could not delete access point {access_point_id}: {error}")
+
+    mount_target_ids = []
+    try:
+        paginator = s3files_client.get_paginator("list_mount_targets")
+        for page in paginator.paginate(fileSystemId=file_system_id):
+            for item in page.get("mountTargets", []):
+                mount_target_id = item.get("mountTargetId")
+                if mount_target_id:
+                    mount_target_ids.append(mount_target_id)
+    except ClientError as error:
+        logger.warning(f"  Could not list S3 Files mount targets: {error}")
+
+    for mount_target_id in mount_target_ids:
+        try:
+            s3files_client.delete_mount_target(mountTargetId=mount_target_id)
+            _wait_for_s3files_resource_deleted(
+                s3files_client.get_mount_target,
+                "mountTargetId",
+                mount_target_id,
+            )
+            logger.info(f"  ✓ Deleted S3 Files mount target: {mount_target_id}")
+        except ClientError as error:
+            if not _is_s3files_not_found(error):
+                logger.warning(f"  Could not delete mount target {mount_target_id}: {error}")
+
+    try:
+        s3files_client.delete_file_system(fileSystemId=file_system_id, forceDelete=True)
+        _wait_for_s3files_resource_deleted(
+            s3files_client.get_file_system,
+            "fileSystemId",
+            file_system_id,
+        )
+        logger.info(f"  ✓ Deleted S3 Files file system: {file_system_id}")
+    except ClientError as error:
+        if not _is_s3files_not_found(error):
+            logger.warning(f"  Could not delete S3 Files file system {file_system_id}: {error}")
+
+    _delete_s3files_sync_role()
+    logger.info("✓ S3 Files session storage deleted")
+
+
+def delete_local_config_files() -> None:
+    """Remove local config files written by installer/runtime installers."""
+    logger.info("[10/10] Deleting local config files")
+
+    for config_path in (_application_config_path(), _runtime_agent_config_path()):
+        try:
+            if os.path.exists(config_path):
+                os.remove(config_path)
+                logger.info(f"  ✓ Deleted {config_path}")
+            else:
+                logger.info(f"  Config not found (may already be deleted): {config_path}")
+        except OSError as error:
+            logger.warning(f"  Could not delete {config_path}: {error}")
+
+    logger.info("✓ Local config files processed")
+
+
 def uninstall_agent_runtime(runtime_type: str = "langgraph") -> bool:
     """Uninstall Agent Runtime by running the appropriate uninstaller.py script."""
     logger.info(f"[10/10] Uninstalling Agent Runtime: {runtime_type}")
@@ -1923,20 +2109,26 @@ def main():
     
     try:
         delete_cloudfront_distributions()
+        if uninstall_agent_runtime("langgraph"):
+            logger.info("Langgraph agent runtime uninstalled...")
+        else:
+            logger.warning("Langgraph agent runtime uninstall failed or was skipped.")
+
         delete_ecs_resources()
         delete_alb_resources()
         delete_ec2_instances()
         delete_nat_gateways()
-        
+        delete_s3_files_session_storage()
+
         # Wait for VPC endpoints to be deleted first
         wait_for_vpc_endpoint_deletion()
         delete_vpc_endpoints_and_wait()
-        
+
         delete_security_groups()
         delete_route_tables()
-        
+
         failed_vpcs = delete_vpc_resources()
-        
+
         delete_opensearch_collection()
         delete_knowledge_bases()
         delete_s3_vectors_store()
@@ -1946,12 +2138,7 @@ def main():
         delete_iam_roles(delete_agentcore_gateway_role=agentcore_gateway_deleted)
         delete_s3_buckets()
         delete_disabled_cloudfront_distributions()
-        
-        # Uninstall agent runtime (MCP servers are in-process in the LangGraph container).
-        if uninstall_agent_runtime("langgraph"):
-            logger.info("Langgraph agent runtime uninstalled...")
-        else:
-            logger.warning("Langgraph agent runtime uninstall failed or was skipped.")
+        delete_local_config_files()
         
         # Retry VPC deletion only if there were failures
         if failed_vpcs:
