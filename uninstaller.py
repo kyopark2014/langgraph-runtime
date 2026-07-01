@@ -20,6 +20,12 @@ region = "us-west-2"
 AGENTCORE_GATEWAY_REGION = "us-east-1"
 AGENTCORE_WEBSEARCH_GATEWAY_NAME = "gateway-websearch"
 
+
+def agent_runtime_name(runtime_type: str) -> str:
+    """Return Bedrock AgentCore runtime name (e.g. runtime_langgraph)."""
+    return f"runtime_{runtime_type.replace('-', '_')}"
+
+
 sts_client = boto3.client("sts", region_name=region)
 account_id = sts_client.get_caller_identity()["Account"]
 
@@ -2032,6 +2038,7 @@ def delete_local_config_files() -> None:
 def uninstall_agent_runtime(runtime_type: str = "langgraph") -> bool:
     """Uninstall Agent Runtime by running the appropriate uninstaller.py script."""
     logger.info(f"[10/10] Uninstalling Agent Runtime: {runtime_type}")
+    logger.info(f"  Agent runtime name: {agent_runtime_name(runtime_type)}")
     
     # Determine uninstaller path based on runtime type
     script_dir = os.path.dirname(os.path.abspath(__file__))

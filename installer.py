@@ -31,6 +31,12 @@ AGENTCORE_WEBSEARCH_GATEWAY_NAME = "gateway-websearch"
 AGENTCORE_WEBSEARCH_TARGET_NAME = "websearch"
 git_name = "langgraph-runtime"
 
+
+def agent_runtime_name(runtime_type: str) -> str:
+    """Return Bedrock AgentCore runtime name (e.g. runtime_langgraph)."""
+    return f"runtime_{runtime_type.replace('-', '_')}"
+
+
 sts_client = boto3.client("sts", region_name=region)
 account_id = sts_client.get_caller_identity()["Account"]
 
@@ -5369,6 +5375,7 @@ def apply_s3_files_config(
 def install_agent_runtime(runtime_type: str = "langgraph") -> bool:
     """Install Agent Runtime by running the appropriate installer.py script."""
     logger.info(f"[11/10] Installing Agent Runtime: {runtime_type}")
+    logger.info(f"  Agent runtime name: {agent_runtime_name(runtime_type)}")
     
     # Determine installer path based on runtime type
     script_dir = os.path.dirname(os.path.abspath(__file__))
