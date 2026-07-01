@@ -1621,6 +1621,181 @@ def create_vpc_endpoint(
             return None
 
 
+def _get_route_table_ids_for_subnets(subnet_ids: List[str], vpc_id: str) -> List[str]:
+    """Return route table IDs associated with subnets, falling back to the VPC main route table."""
+    route_table_ids = set()
+    for subnet_id in subnet_ids:
+        try:
+            response = ec2_client.describe_route_tables(
+                Filters=[{"Name": "association.subnet-id", "Values": [subnet_id]}]
+            )
+            if response["RouteTables"]:
+                route_table_ids.add(response["RouteTables"][0]["RouteTableId"])
+        except Exception as e:
+            logger.debug(f"Could not get route table for subnet {subnet_id}: {e}")
+
+    if not route_table_ids:
+        try:
+            response = ec2_client.describe_route_tables(
+                Filters=[
+                    {"Name": "vpc-id", "Values": [vpc_id]},
+                    {"Name": "association.main", "Values": ["true"]},
+                ]
+            )
+            if response["RouteTables"]:
+                route_table_ids.add(response["RouteTables"][0]["RouteTableId"])
+        except Exception as e:
+            logger.debug(f"Could not get main route table for VPC {vpc_id}: {e}")
+
+    return list(route_table_ids)
+
+
+def _ensure_gateway_endpoint_route_tables(endpoint_id: str, route_table_ids: List[str]) -> None:
+    """Associate additional route tables with an existing S3 gateway VPC endpoint."""
+    if not route_table_ids:
+        return
+    try:
+        response = ec2_client.describe_vpc_endpoints(VpcEndpointIds=[endpoint_id])
+        endpoints = response.get("VpcEndpoints", [])
+        if not endpoints:
+            return
+        current_route_tables = set(endpoints[0].get("RouteTableIds", []))
+        missing_route_tables = [
+            route_table_id
+            for route_table_id in route_table_ids
+            if route_table_id not in current_route_tables
+        ]
+        if missing_route_tables:
+            ec2_client.modify_vpc_endpoint(
+                VpcEndpointId=endpoint_id,
+                AddRouteTableIds=missing_route_tables,
+            )
+            logger.info(
+                "  Associated S3 gateway endpoint %s with route tables: %s",
+                endpoint_id,
+                ", ".join(missing_route_tables),
+            )
+    except ClientError as e:
+        logger.warning(f"  Could not update S3 gateway endpoint route tables: {e}")
+
+
+def create_s3_gateway_vpc_endpoint(
+    vpc_id: str,
+    route_table_ids: List[str],
+    endpoint_name: str = None,
+    check_existing: bool = True,
+) -> Optional[str]:
+    """Create or reuse an S3 gateway VPC endpoint for private subnet route tables."""
+    service_name = f"com.amazonaws.{region}.s3"
+    if not route_table_ids:
+        logger.warning("  Skipping S3 gateway endpoint: no route tables found")
+        return None
+
+    if check_existing:
+        try:
+            existing_endpoints = ec2_client.describe_vpc_endpoints(
+                Filters=[
+                    {"Name": "vpc-id", "Values": [vpc_id]},
+                    {"Name": "service-name", "Values": [service_name]},
+                ]
+            )
+            if existing_endpoints["VpcEndpoints"]:
+                endpoint_id = existing_endpoints["VpcEndpoints"][0]["VpcEndpointId"]
+                logger.debug(f"S3 gateway VPC endpoint already exists: {endpoint_id}")
+                _ensure_gateway_endpoint_route_tables(endpoint_id, route_table_ids)
+                return endpoint_id
+        except Exception as e:
+            logger.debug(f"Could not check existing S3 gateway endpoint: {e}")
+
+    try:
+        endpoint_params = {
+            "VpcId": vpc_id,
+            "ServiceName": service_name,
+            "VpcEndpointType": "Gateway",
+            "RouteTableIds": route_table_ids,
+        }
+        if endpoint_name:
+            endpoint_params["TagSpecifications"] = [
+                {
+                    "ResourceType": "vpc-endpoint",
+                    "Tags": [{"Key": "Name", "Value": endpoint_name}],
+                }
+            ]
+        endpoint_response = ec2_client.create_vpc_endpoint(**endpoint_params)
+        endpoint_id = endpoint_response["VpcEndpoint"]["VpcEndpointId"]
+        logger.info(f"Created S3 gateway VPC endpoint: {endpoint_id}")
+        return endpoint_id
+    except ClientError as e:
+        error_code = e.response.get("Error", {}).get("Code", "")
+        if error_code in ["DuplicateVpcEndpoint", "InvalidVpcEndpoint.Duplicate"]:
+            try:
+                existing_endpoints = ec2_client.describe_vpc_endpoints(
+                    Filters=[
+                        {"Name": "vpc-id", "Values": [vpc_id]},
+                        {"Name": "service-name", "Values": [service_name]},
+                    ]
+                )
+                if existing_endpoints["VpcEndpoints"]:
+                    endpoint_id = existing_endpoints["VpcEndpoints"][0]["VpcEndpointId"]
+                    _ensure_gateway_endpoint_route_tables(endpoint_id, route_table_ids)
+                    return endpoint_id
+            except Exception:
+                pass
+        logger.warning(f"Failed to create S3 gateway VPC endpoint: {e}")
+        raise
+
+
+def ensure_private_subnet_vpc_endpoints(
+    vpc_id: str,
+    private_subnets: List[str],
+    security_group_id: str,
+) -> Dict[str, Optional[str]]:
+    """
+    Ensure VPC endpoints required for private subnet workloads.
+
+    Interface endpoints: ECR API/DKR (image pull), CloudWatch Logs, Secrets Manager,
+    and Bedrock AgentCore data/control planes (ECS + Agent Runtime in private subnets).
+    Gateway endpoint: S3 (ECR image layers).
+    """
+    if not private_subnets or not security_group_id:
+        logger.warning("  Skipping VPC endpoint setup: missing private subnets or security group")
+        return {}
+
+    logger.info(
+        "  Ensuring VPC endpoints for private subnet workloads "
+        "(ECR, Logs, Secrets Manager, Bedrock AgentCore, S3)"
+    )
+    endpoint_ids: Dict[str, Optional[str]] = {}
+    interface_services = [
+        (f"com.amazonaws.{region}.ecr.api", f"ecr-api-endpoint-{project_name}"),
+        (f"com.amazonaws.{region}.ecr.dkr", f"ecr-dkr-endpoint-{project_name}"),
+        (f"com.amazonaws.{region}.logs", f"logs-endpoint-{project_name}"),
+        (f"com.amazonaws.{region}.secretsmanager", f"secretsmanager-endpoint-{project_name}"),
+        (f"com.amazonaws.{region}.bedrock-agentcore", f"bedrock-agentcore-endpoint-{project_name}"),
+        (
+            f"com.amazonaws.{region}.bedrock-agentcore-control",
+            f"bedrock-agentcore-control-endpoint-{project_name}",
+        ),
+    ]
+    for service_name, endpoint_name in interface_services:
+        endpoint_ids[service_name] = create_vpc_endpoint(
+            vpc_id=vpc_id,
+            service_name=service_name,
+            subnet_ids=private_subnets,
+            security_group_ids=[security_group_id],
+            endpoint_name=endpoint_name,
+            check_existing=True,
+        )
+
+    route_table_ids = _get_route_table_ids_for_subnets(private_subnets, vpc_id)
+    endpoint_ids["s3"] = create_s3_gateway_vpc_endpoint(
+        vpc_id=vpc_id,
+        route_table_ids=route_table_ids,
+        endpoint_name=f"s3-endpoint-{project_name}",
+    )
+    return endpoint_ids
+
+
 def create_route(
     route_table_id: str,
     destination_cidr: str = "0.0.0.0/0",
@@ -1655,6 +1830,158 @@ def create_route(
         route_params["NatGatewayId"] = nat_gateway_id
     
     ec2_client.create_route(**route_params)
+
+
+def _find_route_table_by_name(vpc_id: str, route_table_name: str) -> Optional[str]:
+    """Return a route table ID in the VPC that matches the Name tag."""
+    try:
+        route_tables = ec2_client.describe_route_tables(
+            Filters=[{"Name": "vpc-id", "Values": [vpc_id]}]
+        )
+        for rt in route_tables.get("RouteTables", []):
+            for tag in rt.get("Tags", []):
+                if tag.get("Key") == "Name" and tag.get("Value") == route_table_name:
+                    return rt["RouteTableId"]
+    except ClientError as e:
+        logger.debug(f"Could not look up route table {route_table_name}: {e}")
+    return None
+
+
+def _find_route_table_for_nat_gateway(vpc_id: str, nat_gateway_id: str) -> Optional[str]:
+    """Return a route table in the VPC that already routes 0.0.0.0/0 to the NAT gateway."""
+    try:
+        route_tables = ec2_client.describe_route_tables(
+            Filters=[{"Name": "vpc-id", "Values": [vpc_id]}]
+        )
+        for rt in route_tables.get("RouteTables", []):
+            for route in rt.get("Routes", []):
+                if (
+                    route.get("DestinationCidrBlock") == "0.0.0.0/0"
+                    and route.get("NatGatewayId") == nat_gateway_id
+                ):
+                    return rt["RouteTableId"]
+    except ClientError as e:
+        logger.debug(f"Could not look up NAT route table for {nat_gateway_id}: {e}")
+    return None
+
+
+def _ensure_nat_default_route(route_table_id: str, nat_gateway_id: str) -> None:
+    """Ensure 0.0.0.0/0 in the route table points to the NAT gateway."""
+    response = ec2_client.describe_route_tables(RouteTableIds=[route_table_id])
+    routes = response["RouteTables"][0].get("Routes", [])
+    for route in routes:
+        if route.get("DestinationCidrBlock") != "0.0.0.0/0":
+            continue
+        if route.get("NatGatewayId") == nat_gateway_id:
+            return
+        ec2_client.replace_route(
+            RouteTableId=route_table_id,
+            DestinationCidrBlock="0.0.0.0/0",
+            NatGatewayId=nat_gateway_id,
+        )
+        logger.info(
+            "  Updated default route on %s to NAT gateway %s",
+            route_table_id,
+            nat_gateway_id,
+        )
+        return
+
+    create_route(route_table_id=route_table_id, nat_gateway_id=nat_gateway_id)
+    logger.info(
+        "  Added default route on %s to NAT gateway %s",
+        route_table_id,
+        nat_gateway_id,
+    )
+
+
+def _associate_subnet_with_route_table(subnet_id: str, route_table_id: str) -> None:
+    """Associate a subnet with a route table, replacing any existing association."""
+    try:
+        response = ec2_client.describe_route_tables(
+            Filters=[{"Name": "association.subnet-id", "Values": [subnet_id]}]
+        )
+        for rt in response.get("RouteTables", []):
+            for assoc in rt.get("Associations", []):
+                if assoc.get("SubnetId") != subnet_id:
+                    continue
+                if assoc.get("RouteTableId") == route_table_id:
+                    return
+                if not assoc.get("Main", False):
+                    ec2_client.disassociate_route_table(
+                        AssociationId=assoc["RouteTableAssociationId"]
+                    )
+    except ClientError as e:
+        logger.warning(f"  Could not inspect route association for subnet {subnet_id}: {e}")
+
+    try:
+        ec2_client.associate_route_table(RouteTableId=route_table_id, SubnetId=subnet_id)
+        logger.info(f"  Associated private subnet {subnet_id} with route table {route_table_id}")
+    except ClientError as e:
+        error_code = e.response.get("Error", {}).get("Code", "")
+        if error_code == "Resource.AlreadyAssociated":
+            return
+        logger.warning(f"  Could not associate subnet {subnet_id} with route table {route_table_id}: {e}")
+
+
+def ensure_private_subnet_nat_routing(
+    vpc_id: str,
+    public_subnets: List[str],
+    private_subnets: List[str],
+) -> Optional[str]:
+    """
+    Ensure private subnets egress via a NAT gateway.
+
+    Creates a NAT gateway in a public subnet when missing, provisions a dedicated
+    private route table (0.0.0.0/0 -> NAT), and associates each private subnet with it.
+    """
+    if not private_subnets:
+        logger.debug("  Skipping NAT routing setup: no private subnets")
+        return None
+    if not public_subnets:
+        logger.warning(
+            "  Skipping NAT routing setup: no public subnets available for NAT Gateway"
+        )
+        return None
+
+    logger.info("  Ensuring NAT Gateway and private subnet routing")
+    nat_gateway_id = get_or_create_nat_gateway(vpc_id, public_subnets[0])
+
+    private_rt_name = f"private-rt-{project_name}"
+    route_table_id = _find_route_table_for_nat_gateway(vpc_id, nat_gateway_id)
+    if not route_table_id:
+        route_table_id = _find_route_table_by_name(vpc_id, private_rt_name)
+    if not route_table_id:
+        route_table_id = create_route_table(vpc_id, private_rt_name)
+        logger.info(f"  Created private route table: {route_table_id}")
+
+    _ensure_nat_default_route(route_table_id, nat_gateway_id)
+
+    for subnet_id in private_subnets:
+        _associate_subnet_with_route_table(subnet_id, route_table_id)
+
+    # Keep the S3 gateway endpoint associated with private route tables as well.
+    s3_service = f"com.amazonaws.{region}.s3"
+    try:
+        endpoints = ec2_client.describe_vpc_endpoints(
+            Filters=[
+                {"Name": "vpc-id", "Values": [vpc_id]},
+                {"Name": "service-name", "Values": [s3_service]},
+            ]
+        )
+        for endpoint in endpoints.get("VpcEndpoints", []):
+            _ensure_gateway_endpoint_route_tables(
+                endpoint["VpcEndpointId"],
+                [route_table_id],
+            )
+    except ClientError as e:
+        logger.debug(f"  Could not update S3 gateway endpoint route tables: {e}")
+
+    logger.info(
+        "  ✓ Private subnet NAT routing ready (NAT: %s, route table: %s)",
+        nat_gateway_id,
+        route_table_id,
+    )
+    return nat_gateway_id
 
 
 def create_route_table(vpc_id: str, route_table_name: str) -> str:
@@ -1708,6 +2035,64 @@ def create_vpc_resource(vpc_name: str, cidr_block: str) -> str:
     except Exception as e:
         logger.error(f"Failed to create VPC: {e}")
         raise
+
+
+def _is_valid_dhcp_options_id(dhcp_options_id: Optional[str]) -> bool:
+    """Return True if dhcp_options_id exists in the current region."""
+    if not dhcp_options_id or not str(dhcp_options_id).startswith("dopt-"):
+        return False
+    try:
+        ec2_client.describe_dhcp_options(DhcpOptionsIds=[dhcp_options_id])
+        return True
+    except ClientError:
+        return False
+
+
+def get_or_create_dhcp_options() -> str:
+    """Return a valid regional DHCP options set ID."""
+    dhcp_options = ec2_client.describe_dhcp_options().get("DhcpOptions", [])
+    if dhcp_options:
+        return dhcp_options[0]["DhcpOptionsId"]
+
+    logger.info("  Creating regional DHCP options set...")
+    response = ec2_client.create_dhcp_options(
+        DhcpConfigurations=[
+            {
+                "Key": "domain-name-servers",
+                "Values": [{"Value": "AmazonProvidedDNS"}],
+            }
+        ],
+        TagSpecifications=[
+            {
+                "ResourceType": "dhcp-options",
+                "Tags": [{"Key": "Name", "Value": f"dhcp-options-for-{project_name}"}],
+            }
+        ],
+    )
+    dhcp_options_id = response["DhcpOptions"]["DhcpOptionsId"]
+    logger.info(f"  ✓ Created DHCP options set: {dhcp_options_id}")
+    return dhcp_options_id
+
+
+def ensure_vpc_dhcp_options(vpc_id: str) -> None:
+    """Ensure the VPC is associated with a valid DHCP options set.
+
+    Fargate/ECS task placement fails with InvalidDhcpOptionID.NotFound when the VPC
+    references a missing or literal \"default\" DHCP options ID.
+    """
+    vpc = ec2_client.describe_vpcs(VpcIds=[vpc_id])["Vpcs"][0]
+    current_dhcp_id = vpc.get("DhcpOptionsId")
+    if _is_valid_dhcp_options_id(current_dhcp_id):
+        logger.debug(f"VPC {vpc_id} DHCP options OK: {current_dhcp_id}")
+        return
+
+    dhcp_options_id = get_or_create_dhcp_options()
+    logger.warning(
+        f"VPC {vpc_id} has invalid DHCP options ({current_dhcp_id!r}); "
+        f"associating {dhcp_options_id}"
+    )
+    ec2_client.associate_dhcp_options(DhcpOptionsId=dhcp_options_id, VpcId=vpc_id)
+    logger.info(f"  ✓ Associated DHCP options {dhcp_options_id} with VPC {vpc_id}")
 
 
 def create_private_subnets(
@@ -1957,7 +2342,10 @@ def ensure_private_subnets(vpc_id: str, public_subnets: List[str], existing_subn
                 available_private_subnets.append(subnet_id)
         if available_private_subnets:
             private_subnets = available_private_subnets
-    
+
+    if private_subnets and public_subnets:
+        ensure_private_subnet_nat_routing(vpc_id, public_subnets, private_subnets)
+
     return private_subnets
 
 
@@ -1975,7 +2363,8 @@ def create_vpc() -> Dict[str, str]:
     if vpcs["Vpcs"]:
         vpc_id = vpcs["Vpcs"][0]["VpcId"]
         logger.warning(f"VPC already exists: {vpc_id}")
-        
+        ensure_vpc_dhcp_options(vpc_id)
+
         try:
             # Get existing resources
             subnets = ec2_client.describe_subnets(
@@ -1988,7 +2377,9 @@ def create_vpc() -> Dict[str, str]:
             # If no private subnets found, create them automatically
             if not private_subnets:
                 private_subnets = ensure_private_subnets(vpc_id, public_subnets, subnets["Subnets"])
-            
+            elif public_subnets:
+                ensure_private_subnet_nat_routing(vpc_id, public_subnets, private_subnets)
+
             # Validate that we have at least 2 public subnets (should always be true for VPCs created by this script)
             if len(public_subnets) < 2:
                 raise ValueError(
@@ -2043,45 +2434,18 @@ def create_vpc() -> Dict[str, str]:
                         ]
                     )
             
-            # Get VPC endpoint
-            endpoints = ec2_client.describe_vpc_endpoints(
-                Filters=[{"Name": "vpc-id", "Values": [vpc_id]}]
-            )
-            vpc_endpoint_id = endpoints["VpcEndpoints"][0]["VpcEndpointId"] if endpoints["VpcEndpoints"] else None
-            
-            # Check and fix routing table for internet access
-            logger.debug("Checking routing table for internet access")
-            route_tables = ec2_client.describe_route_tables(
-                Filters=[{"Name": "vpc-id", "Values": [vpc_id]}]
-            )
-            
-            # Find main route table and check for internet gateway route
-            main_rt_id = None
-            has_igw_route = False
-            
-            for rt in route_tables["RouteTables"]:
-                for assoc in rt.get("Associations", []):
-                    if assoc.get("Main", False):
-                        main_rt_id = rt["RouteTableId"]
-                        # Check if IGW route exists
-                        for route in rt["Routes"]:
-                            if route.get("DestinationCidrBlock") == "0.0.0.0/0" and route.get("GatewayId", "").startswith("igw-"):
-                                has_igw_route = True
-                                break
-                        break
-            
-            # Check and create Internet Gateway if missing
-            igw_id = get_or_create_internet_gateway(vpc_id)
-            
-            # Add IGW route if missing
-            if main_rt_id and not has_igw_route and igw_id:
-                try:
-                    create_route(route_table_id=main_rt_id, gateway_id=igw_id)
-                    logger.info(f"  Added internet gateway route to main route table: {main_rt_id}")
-                except ClientError as e:
-                    if e.response["Error"]["Code"] != "RouteAlreadyExists":
-                        logger.warning(f"Failed to add IGW route: {e}")
-            
+            vpc_endpoint_id = None
+            if ecs_sg_id and private_subnets:
+                vpc_endpoint_id = create_vpc_endpoint(
+                    vpc_id=vpc_id,
+                    service_name=f"com.amazonaws.{region}.bedrock-runtime",
+                    subnet_ids=private_subnets,
+                    security_group_ids=[ecs_sg_id],
+                    endpoint_name=f"bedrock-endpoint-{project_name}",
+                    check_existing=True,
+                )
+                ensure_private_subnet_vpc_endpoints(vpc_id, private_subnets, ecs_sg_id)
+
             return {
                 "vpc_id": vpc_id,
                 "public_subnets": public_subnets,
@@ -2242,6 +2606,26 @@ def create_vpc() -> Dict[str, str]:
                     logger.warning(f"  Could not get or create ECS security group: {e}")
                     ecs_sg_id = None
             
+            if ecs_sg_id and private_subnets:
+                if 'vpc_endpoint_id' not in locals() or not vpc_endpoint_id:
+                    vpc_endpoint_id = create_vpc_endpoint(
+                        vpc_id=vpc_id,
+                        service_name=f"com.amazonaws.{region}.bedrock-runtime",
+                        subnet_ids=private_subnets,
+                        security_group_ids=[ecs_sg_id],
+                        endpoint_name=f"bedrock-endpoint-{project_name}",
+                        check_existing=True,
+                    )
+                ensure_private_subnet_vpc_endpoints(vpc_id, private_subnets, ecs_sg_id)
+
+            if (
+                "public_subnets" in locals()
+                and "private_subnets" in locals()
+                and public_subnets
+                and private_subnets
+            ):
+                ensure_private_subnet_nat_routing(vpc_id, public_subnets, private_subnets)
+
             # Return minimal configuration with existing VPC
             return {
                 "vpc_id": vpc_id,
@@ -2262,21 +2646,22 @@ def create_vpc() -> Dict[str, str]:
     logger.debug("Enabling DNS hostnames and DNS support")
     ec2_client.modify_vpc_attribute(VpcId=vpc_id, EnableDnsHostnames={"Value": True})
     ec2_client.modify_vpc_attribute(VpcId=vpc_id, EnableDnsSupport={"Value": True})
-    
+    ensure_vpc_dhcp_options(vpc_id)
+
     # Get availability zones
     logger.debug("Getting availability zones")
     azs = ec2_client.describe_availability_zones()["AvailabilityZones"][:2]
     az_names = [az["ZoneName"] for az in azs]
     logger.debug(f"Using availability zones: {az_names}")
-    
+
     # Parse CIDR to get base network for subnet creation
     vpc_network = ipaddress.ip_network(cidr_block)
     base_octets = str(vpc_network.network_address).split('.')
-    
+
     # Create Internet Gateway
     logger.debug("Creating Internet Gateway")
     igw_id = get_or_create_internet_gateway(vpc_id)
-    
+
     # Create public subnets
     logger.debug("Creating public subnets")
     public_subnets = create_public_subnets(
@@ -2285,7 +2670,7 @@ def create_vpc() -> Dict[str, str]:
         base_octets=base_octets,
         offset=0
     )
-    
+
     # Create NAT Gateway in first public subnet
     logger.debug("Creating NAT Gateway")
     nat_gateway_id = get_or_create_nat_gateway(vpc_id, public_subnets[0])
@@ -2344,20 +2729,20 @@ def create_vpc() -> Dict[str, str]:
     )
     logger.debug(f"ECS security group created: {ecs_sg_id}")
     
-    # Create VPC endpoints for Bedrock and SSM
+    # Create VPC endpoints for Bedrock and private subnet workloads
     logger.debug("Creating VPC endpoints")
-    
-    # Bedrock endpoint
+
     vpc_endpoint_id = create_vpc_endpoint(
         vpc_id=vpc_id,
         service_name=f"com.amazonaws.{region}.bedrock-runtime",
         subnet_ids=private_subnets,
         security_group_ids=[ecs_sg_id],
         endpoint_name=f"bedrock-endpoint-{project_name}",
-        check_existing=True
+        check_existing=True,
     )
-    
-    logger.debug(f"VPC endpoints created")
+    ensure_private_subnet_vpc_endpoints(vpc_id, private_subnets, ecs_sg_id)
+
+    logger.debug("VPC endpoints created")
     
     logger.info(f"✓ VPC created: {vpc_id}")
     
@@ -5281,6 +5666,53 @@ def _add_security_group_to_vpc_endpoint(endpoint_id: str, security_group_id: str
         logger.warning(f"  Could not update VPC endpoint {endpoint_id}: {e}")
 
 
+def _add_security_group_to_vpc_endpoint_by_service(
+    vpc_id: str,
+    service_name: str,
+    security_group_id: str,
+) -> None:
+    """Attach a security group to an existing interface VPC endpoint by service name."""
+    if not vpc_id or not security_group_id:
+        return
+    try:
+        response = ec2_client.describe_vpc_endpoints(
+            Filters=[
+                {"Name": "vpc-id", "Values": [vpc_id]},
+                {"Name": "service-name", "Values": [service_name]},
+            ]
+        )
+        endpoints = response.get("VpcEndpoints", [])
+        if not endpoints:
+            logger.debug(f"  VPC endpoint not found for {service_name} in {vpc_id}")
+            return
+        _add_security_group_to_vpc_endpoint(
+            endpoints[0]["VpcEndpointId"],
+            security_group_id,
+        )
+    except ClientError as e:
+        logger.warning(
+            f"  Could not attach {security_group_id} to VPC endpoint {service_name}: {e}"
+        )
+
+
+def _ensure_agent_runtime_vpc_endpoint_access(
+    vpc_id: str,
+    agent_runtime_sg_id: str,
+) -> None:
+    """Allow AgentCore runtime tasks to reach private-subnet interface VPC endpoints."""
+    for service_name in (
+        f"com.amazonaws.{region}.bedrock-runtime",
+        f"com.amazonaws.{region}.bedrock-agentcore",
+        f"com.amazonaws.{region}.bedrock-agentcore-control",
+        f"com.amazonaws.{region}.secretsmanager",
+    ):
+        _add_security_group_to_vpc_endpoint_by_service(
+            vpc_id,
+            service_name,
+            agent_runtime_sg_id,
+        )
+
+
 def create_s3_files_session_storage(
     vpc_info: Dict[str, str],
     s3_bucket_name: str,
@@ -5339,8 +5771,8 @@ def create_s3_files_session_storage(
         access_point_arn,
         agent_runtime_role_arn,
     )
-    _add_security_group_to_vpc_endpoint(
-        vpc_info.get("vpc_endpoint_id"),
+    _ensure_agent_runtime_vpc_endpoint_access(
+        vpc_info["vpc_id"],
         agent_runtime_sg_id,
     )
 

@@ -107,6 +107,111 @@ flowchart TB
 
 UI에서 MCP는 `application/mcp.list` 기준으로 `tavily`, `knowledge base`, `aws documentation`, `trade info`, `web_fetch`, `image generation`, `사용자 설정`을 체크박스로 선택합니다. Skill은 `application/skills.list`에서 `docx`, `pptx`, `xlsx`, `skill-creator` 등을 별도로 선택합니다. 로컬 개발 시에는 `application/agentcore_client.py`의 `run_agent_in_docker`로 `runtime_agent/langgraph/Dockerfile` 이미지(`localhost:8080`)에 직접 요청할 수 있습니다.
 
+### 네트워크 설정
+
+`langgraph-runtime`은 **ECS(Streamlit UI)** 와 **AgentCore Runtime(LangGraph 서버)** 가 모두 **private subnet** 에 배포됩니다. 이 환경에서는 인터넷으로 직접 나가지 않으므로, AWS API 호출은 **VPC Interface/Gateway Endpoint** 로, 외부 MCP·npm·cross-region 트래픽은 **NAT Gateway** 로 egress 를 열어야 합니다.
+
+[installer.py](./installer.py) 가 신규 VPC 생성뿐 아니라 **기존 VPC 재사용 시**에도 아래 리소스를 자동으로 맞춥니다.
+
+#### 구성 요약
+
+```text
+[사용자] → CloudFront → ALB (public subnet)
+                              ↓
+                    ECS App (private subnet)
+                              ↓ bedrock-agentcore VPC Endpoint
+                    AgentCore Runtime (private subnet, VPC mode)
+                              ↓
+              MCP: websearch (us-east-1 Gateway) / web_fetch (npm)
+                              ↓ NAT Gateway (public subnet 경유)
+                         Internet
+```
+
+| 구성 요소 | Subnet | 인터넷 egress |
+|-----------|--------|----------------|
+| ALB | Public | IGW |
+| ECS Fargate | Private | VPC Endpoint + NAT |
+| AgentCore Runtime | Private | VPC Endpoint + NAT |
+
+#### VPC Interface Endpoint (us-west-2)
+
+Private subnet 워크로드가 **같은 리전(us-west-2)** AWS API 에 도달할 때 사용합니다. `ensure_private_subnet_vpc_endpoints()` 가 생성·재사용합니다.
+
+| AWS 서비스 | Endpoint 서비스 이름 | 용도 |
+|------------|----------------------|------|
+| Amazon ECR API | `com.amazonaws.us-west-2.ecr.api` | ECS/Runtime 이미지 pull 메타데이터 |
+| Amazon ECR DKR | `com.amazonaws.us-west-2.ecr.dkr` | 컨테이너 이미지 레이어 pull |
+| CloudWatch Logs | `com.amazonaws.us-west-2.logs` | ECS·Runtime 로그 전송 |
+| Secrets Manager | `com.amazonaws.us-west-2.secretsmanager` | Runtime cold start 시 Tavily API 키 로드 ([runtime_agent/langgraph/utils.py](./runtime_agent/langgraph/utils.py)) |
+| Bedrock AgentCore | `com.amazonaws.us-west-2.bedrock-agentcore` | ECS → `invoke_agent_runtime` |
+| Bedrock AgentCore Control | `com.amazonaws.us-west-2.bedrock-agentcore-control` | Runtime ARN 검증, gateway 조회 |
+| Amazon Bedrock Runtime | `com.amazonaws.us-west-2.bedrock-runtime` | LangGraph 모델 호출 (별도 생성) |
+| Amazon S3 | `com.amazonaws.us-west-2.s3` (Gateway) | ECR 레이어·아티팩트·스토리지 |
+
+Endpoint 는 private subnet 에 배치되며, ECS security group 과 Agent Runtime security group 모두 ingress(443) 를 허용해야 합니다.
+
+#### NAT Gateway 와 private route table
+
+아래 트래픽은 **VPC Endpoint 만으로는 처리할 수 없습니다.** Public subnet 에 **NAT Gateway** 를 두고, private subnet 전용 route table 에 `0.0.0.0/0 → NAT` 를 연결합니다 (`ensure_private_subnet_nat_routing()`).
+
+| 트래픽 | 이유 |
+|--------|------|
+| **Websearch MCP** | Gateway 가 **us-east-1** (`gateway.bedrock-agentcore.us-east-1.amazonaws.com`) 에 있음. us-west-2 VPC Endpoint 로는 **다른 리전 API·Gateway HTTPS** 에 도달 불가 |
+| **Websearch gateway URL 조회** | [runtime_agent/langgraph/mcp_config.py](./runtime_agent/langgraph/mcp_config.py) 가 `bedrock-agentcore-control` **us-east-1** API 호출 (`list_gateways` / `get_gateway`) |
+| **Web_fetch MCP** | `npx -y mcp-server-fetch-typescript` 가 **npm registry** (`registry.npmjs.org`) 접속 필요 |
+| **외부 URL fetch** | web_fetch·일반 HTTP 도구가 public 인터넷 대상에 접근 |
+
+Websearch gateway 는 installer 가 `AGENTCORE_GATEWAY_REGION = "us-east-1"` 에 생성합니다. Runtime 은 us-west-2 VPC 에 있으므로 gateway 제어·데이터 평면 모두 **NAT egress** 가 필요합니다.
+
+`application/config.json` 에 `agentcore_websearch_gateway_url` 이 있어도, gateway 에 **HTTPS로 연결**할 때는 여전히 NAT 가 필요합니다.
+
+#### Websearch / Web_fetch 동작 경로
+
+**Websearch** ([runtime_agent/langgraph/mcp_config.py](./runtime_agent/langgraph/mcp_config.py) → `websearch`):
+
+1. (선택) `bedrock-agentcore-control` us-east-1 에서 gateway URL 조회  
+2. `https://gateway-websearch-*.gateway.bedrock-agentcore.us-east-1.amazonaws.com/mcp` 로 MCP streamable HTTP 연결 (SigV4)
+
+**Web_fetch** (`mcp_config.py` → `web_fetch`):
+
+1. `npx` 로 `mcp-server-fetch-typescript` 패키지 다운로드 (인터넷)  
+2. 런타임 중 대상 URL HTTP fetch (인터넷)
+
+채팅 UI 기본 MCP 가 `['websearch', 'web_fetch']` 이므로, **NAT 없이** 배포하면 MCP 초기화 단계에서 요청이 멈춘 것처럼 보일 수 있습니다. MCP 없이 동작 확인 시 payload 에 `mcp_servers: []` 를 사용할 수 있습니다.
+
+#### installer 자동 설정
+
+루트 [installer.py](./installer.py) 실행 시 네트워크 관련 단계:
+
+1. **VPC** — public/private subnet, security group  
+2. **NAT Gateway** — public subnet 에 생성, private subnet → `private-rt-{project}` 연결  
+3. **VPC Endpoint** — 위 표의 Interface/Gateway Endpoint  
+4. **Agent Runtime VPC** — Runtime 을 private subnet + 전용 SG 로 배포 (`networkMode: VPC`)  
+5. **S3 Files** — 세션 스토리지(NFS)용 mount target  
+
+기존 VPC 를 재사용해도 private subnet 이 이미 있으면 NAT·route table 연결을 **다시 검증·보완**합니다.
+
+#### 증상별 점검
+
+| 증상 | CloudWatch 로그 힌트 | 확인 사항 |
+|------|----------------------|-----------|
+| UI 는 열리나 채팅 무응답 | ECS: `agentcore_client` 이후 로그 없음 | `bedrock-agentcore`, `bedrock-agentcore-control` Endpoint |
+| Runtime cold start 120초 초과 | Runtime: `utils.py` 까지만 반복 | `secretsmanager` Endpoint |
+| MCP 로드 후 멈춤 | Runtime: `mcp_servers: ['websearch', 'web_fetch']` 이후 정지 | **NAT Gateway**, private route `0.0.0.0/0 → NAT` |
+| Websearch 만 실패 | gateway us-east-1 관련 timeout | NAT + IAM(InvokeGateway) |
+
+로그 그룹:
+
+- ECS UI: `/ecs/app-for-langgraph-runtime`  
+- Agent Runtime: `/aws/bedrock-agentcore/runtimes/runtime_langgraph-*-DEFAULT`
+
+#### 비용 참고
+
+- **VPC Interface Endpoint**: 시간당·데이터 처리 요금  
+- **NAT Gateway**: 시간당 요금 + NAT 처리 데이터 요금 (websearch/web_fetch 사용 시 발생)
+
+운영 환경에서 MCP 를 쓰지 않는다면 NAT 없이 VPC Endpoint 만으로도 기본 채팅(`mcp_servers: []`)은 가능합니다. Websearch·Web_fetch 를 쓰려면 NAT 구성을 권장합니다.
+
 ### AgentCore 소개
 
 - AgentCore Runtime: AI agent와 tool을 배포하고 트래픽에 따라 자동으로 확장(Scaling)이 가능한 serverless runtime입니다. LangGraph, CrewAI, Strands Agents를 포함한 다양한 오픈소스 프레임워크을 지원합니다. 빠른 cold start, 세션 격리, 내장된 신원 확인(built-in identity), multimodal payload를 지원합니다. 이를 통해 안전하고 빠른 출시가 가능합니다.
