@@ -654,7 +654,10 @@ async def call_model(state: State, config):
                 f"(max_turns={max_turns})"
             )
             messages = trimmed
-        
+
+        if chat.uses_adaptive_thinking():
+            messages = chat.sanitize_adaptive_thinking_messages(messages)
+
         prompt = ChatPromptTemplate.from_messages(
             [
                 ("system", system),
@@ -678,6 +681,8 @@ async def call_model(state: State, config):
             response = merged if isinstance(merged, AIMessage) else AIMessage(
                 content=getattr(merged, "content", str(merged))
             )
+        if chat.uses_adaptive_thinking():
+            response = chat.sanitize_adaptive_thinking_messages([response])[0]
         logger.info(f"response of call_model: {response}")
 
     except Exception:

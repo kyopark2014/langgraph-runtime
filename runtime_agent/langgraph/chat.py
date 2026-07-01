@@ -70,7 +70,7 @@ s3_image_prefix = "images"
 path = config.get('sharing_url', '')
 doc_prefix = "docs/"
 
-model_name = "Claude 4.6 Sonnet"
+model_name = "Claude 5.0 Sonnet"
 model_type = "claude"
 models = info.get_model_info(model_name)
 model_id = models[0]["model_id"]
@@ -349,8 +349,69 @@ def _thread_scope(mcp_servers: list, skill_list: list) -> str:
 
 
 selected_chat = 0
+
+
+def is_fable_model(model_id: str | None = None) -> bool:
+    if not model_id:
+        if not models:
+            return False
+        model_id = models[0].get("model_id", "")
+    return "fable" in model_id.lower()
+
+
+def uses_adaptive_thinking(model_id: str | None = None) -> bool:
+    if not model_id:
+        if not models:
+            return False
+        model_id = models[0].get("model_id", "")
+    model_id = model_id.lower()
+    return "fable" in model_id or "claude-sonnet-5" in model_id
+
+
+def sanitize_adaptive_thinking_messages(messages: list) -> list:
+    """Remove thinking blocks that cannot be replayed to Bedrock on later turns."""
+    sanitized = []
+    for msg in messages:
+        if not isinstance(msg, AIMessage):
+            sanitized.append(msg)
+            continue
+
+        content = msg.content
+        if not isinstance(content, list):
+            sanitized.append(msg)
+            continue
+
+        cleaned = [
+            block for block in content
+            if not (isinstance(block, dict) and block.get("type") == "thinking")
+        ]
+        if not cleaned:
+            cleaned = ""
+        elif (
+            len(cleaned) == 1
+            and isinstance(cleaned[0], dict)
+            and cleaned[0].get("type") == "text"
+        ):
+            cleaned = cleaned[0].get("text", "")
+
+        sanitized.append(
+            AIMessage(
+                content=cleaned,
+                tool_calls=getattr(msg, "tool_calls", None) or [],
+                additional_kwargs=getattr(msg, "additional_kwargs", {}),
+                response_metadata=getattr(msg, "response_metadata", {}),
+                id=getattr(msg, "id", None),
+            )
+        )
+    return sanitized
+
+
 def get_max_output_tokens(model_id: str = "") -> int:
     """Return the max output tokens based on the model ID."""
+    if is_fable_model(model_id):
+        return 128000
+    if "claude-sonnet-5" in model_id:
+        return 128000
     if "claude-opus-4-6" in model_id:
         return 128000
     if "claude-opus-4-5" in model_id:
@@ -414,6 +475,12 @@ def get_chat():
         maxOutputTokens = 5120 # 5k
 
     logger.info(f"modelId: {modelId}, model_type: {model_type}, bedrock_region: {bedrock_region}")
+
+    if is_fable_model(modelId):
+        bedrock_data_retention.ensure_fable_data_retention(
+            modelId,
+            bedrock_region=bedrock_region,
+        )
 
     if profile["model_type"] == "openai":
         return _build_openai_chat(profile, maxOutputTokens)
