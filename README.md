@@ -524,6 +524,9 @@ cd ../..
 
 #### 2) 백엔드 실행
 
+로컬 개발 시 Web UI 백엔드는 **Docker 없이 uvicorn**으로 실행하고, Agent 추론은 **항상 AgentCore Runtime**(`invoke_agent_runtime`)을 사용합니다. `run_agent_in_docker` / `localhost:8080` 로컬 Docker agent 경로는 사용하지 않습니다.
+
+
 ```text
 uvicorn application.server:app --host 0.0.0.0 --port 8501
 ```
