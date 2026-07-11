@@ -754,7 +754,7 @@ def buildChatAgent(tools):
 
     return workflow.compile() 
 
-def buildChatAgentWithHistory(tools):
+def buildChatAgentWithHistory(tools, checkpointer=None):
     tool_node = ToolNode(tools)
 
     workflow = StateGraph(State)
@@ -772,7 +772,8 @@ def buildChatAgentWithHistory(tools):
     )
     workflow.add_edge("action", "agent")
 
-    return workflow.compile(checkpointer=chat.checkpointer)
+    cp = checkpointer if checkpointer is not None else chat.checkpointer
+    return workflow.compile(checkpointer=cp)
 
 def load_multiple_mcp_server_parameters(mcp_json: dict):
     mcpServers = mcp_json.get("mcpServers")

@@ -160,9 +160,13 @@ async def agent_langgraph(payload):
         guardrailEnabled=payload.get("guardrail_enabled"),
     )
 
-    history_mode = payload.get("history_mode", "Disable")
-    logger.info(f"history_mode: {history_mode}")
     logger.info(f"guardrail_enabled: {chat.guardrail_enabled}")
+
+    runtime_session_id = payload.get("runtime_session_id")
+    if not runtime_session_id:
+        runtime_session_id = chat._runtime_session_id()
+    logger.info(f"runtime_session_id: {runtime_session_id}")
+    chat.set_checkpoint_session_id(runtime_session_id)
 
     try:
         if auth_type == "iam":
@@ -181,7 +185,11 @@ async def agent_langgraph(payload):
                 return
 
         try:
-            app, config = await chat.create_agent(mcp_servers, skill_list, history_mode)
+            app, config = await chat.create_agent(
+                mcp_servers,
+                skill_list,
+                runtime_session_id=runtime_session_id,
+            )
         except Exception as e:
             logger.error(f"Failed to create agent: {traceback.format_exc()}")
             yield {
@@ -201,8 +209,99 @@ async def agent_langgraph(payload):
 
         result_text = ""
         tool_used = False
-        tool_input_list = {}
-        yielded_tool_ids = set()
+        tool_input_list: dict[str, str] = {}
+        tool_name_by_id: dict[str, str] = {}
+        tool_args_by_id: dict[str, dict] = {}
+        last_tool_args_json: dict[str, str] = {}
+        yielded_tool_ids: set[str] = set()
+        partial_json_tools: set[str] = set()
+
+        def remember_tool_args(tool_use_id: str, tool_name: str, args) -> dict | None:
+            if not tool_use_id or not tool_name:
+                return None
+            tool_name_by_id[tool_use_id] = tool_name
+            if isinstance(args, dict):
+                if not args:
+                    return None
+                tool_args_by_id[tool_use_id] = args
+            args_json = json.dumps(args, ensure_ascii=False, sort_keys=True)
+            if last_tool_args_json.get(tool_use_id) == args_json:
+                return None
+            last_tool_args_json[tool_use_id] = args_json
+            yielded_tool_ids.add(tool_use_id)
+            logger.info(
+                "tool_name: %s, content: %s, toolUseId: %s",
+                tool_name,
+                args,
+                tool_use_id,
+            )
+            return {
+                "tool": tool_name,
+                "input": args,
+                "toolUseId": tool_use_id,
+            }
+
+        def tool_call_fields(tool_call) -> tuple[str, str, dict]:
+            if isinstance(tool_call, dict):
+                return (
+                    tool_call.get("id", ""),
+                    tool_call.get("name", ""),
+                    tool_call.get("args", {}) if isinstance(tool_call.get("args"), dict) else {},
+                )
+            return (
+                getattr(tool_call, "id", "") or "",
+                getattr(tool_call, "name", "") or "",
+                getattr(tool_call, "args", {}) or {},
+            )
+
+        def args_from_ai_message(message: AIMessage, tool_use_id: str) -> dict:
+            for tc in getattr(message, "tool_calls", None) or []:
+                tid, _, args = tool_call_fields(tc)
+                if tid == tool_use_id and args:
+                    return args
+            content = message.content
+            if isinstance(content, list):
+                for item in content:
+                    if not isinstance(item, dict) or item.get("type") != "tool_use":
+                        continue
+                    if item.get("id") == tool_use_id:
+                        input_val = item.get("input")
+                        if isinstance(input_val, dict) and input_val:
+                            return input_val
+            return {}
+
+        async def args_from_graph_state(tool_use_id: str) -> dict:
+            try:
+                state = await app.aget_state(config)
+            except Exception:
+                logger.exception("Failed to read graph state for tool args")
+                return {}
+            messages = (state.values or {}).get("messages", [])
+            for message in reversed(messages):
+                if isinstance(message, AIMessage):
+                    args = args_from_ai_message(message, tool_use_id)
+                    if args:
+                        return args
+            return {}
+
+        def yield_tool_args(tool_use_id: str, tool_name: str, args) -> dict | None:
+            payload = remember_tool_args(tool_use_id, tool_name, args)
+            return payload
+
+        def resolved_tool_args(tool_use_id: str) -> dict:
+            if tool_use_id in tool_args_by_id:
+                return tool_args_by_id[tool_use_id]
+            args_raw = tool_input_list.get(tool_use_id, "")
+            if not args_raw:
+                return {}
+            try:
+                parsed = json.loads(args_raw)
+            except json.JSONDecodeError:
+                return {"_raw": args_raw}
+            if isinstance(parsed, dict):
+                tool_args_by_id[tool_use_id] = parsed
+                return parsed
+            return {"value": parsed}
 
         # call_model이 chain.astream을 쓰므로 LLM 토큰/청크가 그래프로 전달됨 (langgraph_agent.call_model)
         async for stream in app.astream(inputs, config, stream_mode="messages"):
@@ -232,11 +331,23 @@ async def agent_langgraph(payload):
                                 yield {"data": text_part}
                         elif item.get("type") == "tool_use":
                             tool_use_id = item.get("id", "")
-                            tool_name = item.get("name", "")
+                            tool_name = item.get("name", "") or tool_name_by_id.get(tool_use_id, "")
                             if tool_use_id and tool_name:
-                                if tool_use_id not in tool_input_list:
-                                    tool_input_list[tool_use_id] = ""
+                                tool_name_by_id[tool_use_id] = tool_name
+                                tool_input_list.setdefault(tool_use_id, "")
+                            # Bedrock sends input={} before partial_json; skip empty placeholders.
+                            if "input" in item and item.get("input") is not None:
+                                input_val = item.get("input")
+                                if isinstance(input_val, dict) and input_val:
+                                    payload = yield_tool_args(
+                                        tool_use_id,
+                                        tool_name_by_id.get(tool_use_id, tool_name),
+                                        input_val,
+                                    )
+                                    if payload:
+                                        yield payload
                             if "partial_json" in item:
+                                partial_json_tools.add(tool_use_id)
                                 pj = item.get("partial_json", "") or ""
                                 if tool_use_id:
                                     tool_input_list[tool_use_id] = tool_input_list.get(tool_use_id, "") + pj
@@ -244,16 +355,13 @@ async def agent_langgraph(payload):
                                 if tool_use_id and args_raw:
                                     try:
                                         args_obj = json.loads(args_raw)
-                                        if tool_use_id not in yielded_tool_ids:
-                                            yielded_tool_ids.add(tool_use_id)
-                                            logger.info(
-                                                f"tool_name: {tool_name}, content: {args_obj}, toolUseId: {tool_use_id}"
-                                            )
-                                            yield {
-                                                "tool": tool_name,
-                                                "input": args_obj,
-                                                "toolUseId": tool_use_id,
-                                            }
+                                        payload = yield_tool_args(
+                                            tool_use_id,
+                                            tool_name_by_id.get(tool_use_id, tool_name),
+                                            args_obj,
+                                        )
+                                        if payload:
+                                            yield payload
                                     except json.JSONDecodeError:
                                         pass
                 if getattr(chunk, "tool_calls", None):
@@ -268,9 +376,11 @@ async def agent_langgraph(payload):
                             tid = getattr(tc, "id", "") or ""
                             name = getattr(tc, "name", "") or ""
                             args = getattr(tc, "args", {}) or {}
-                        if tid and tid not in yielded_tool_ids:
-                            yielded_tool_ids.add(tid)
-                            yield {"tool": name, "input": args, "toolUseId": tid}
+                        if not tid or not name or not args:
+                            continue
+                        payload = yield_tool_args(tid, name, args)
+                        if payload:
+                            yield payload
 
             elif isinstance(chunk, AIMessage):
                 content = chunk.content
@@ -283,6 +393,14 @@ async def agent_langgraph(payload):
                             text_part = item.get("text", "")
                             if text_part:
                                 text_parts.append(text_part)
+                        elif isinstance(item, dict) and item.get("type") == "tool_use":
+                            tool_use_id = item.get("id", "")
+                            tool_name = item.get("name", "") or tool_name_by_id.get(tool_use_id, "")
+                            input_val = item.get("input")
+                            if tool_use_id and tool_name and isinstance(input_val, dict) and input_val:
+                                payload = yield_tool_args(tool_use_id, tool_name, input_val)
+                                if payload:
+                                    yield payload
                 for text_part in text_parts:
                     if tool_used:
                         result_text = text_part
@@ -302,14 +420,44 @@ async def agent_langgraph(payload):
                             tid = getattr(tc, "id", "") or ""
                             name = getattr(tc, "name", "") or ""
                             args = getattr(tc, "args", {}) or {}
-                        if tid and tid not in yielded_tool_ids:
-                            yielded_tool_ids.add(tid)
-                            yield {"tool": name, "input": args, "toolUseId": tid}
+                        if not tid or not name or not args:
+                            continue
+                        payload = yield_tool_args(tid, name, args)
+                        if payload:
+                            yield payload
 
             elif isinstance(chunk, ToolMessage):
                 logger.info(f"ToolMessage: {chunk.name}, {chunk.content}")
                 tool_used = True
-                yield {"toolResult": chunk.content, "toolUseId": chunk.tool_call_id}
+                tool_use_id = chunk.tool_call_id or ""
+                tool_name = chunk.name or tool_name_by_id.get(tool_use_id, "")
+                if tool_use_id and tool_name:
+                    args_obj = resolved_tool_args(tool_use_id)
+                    if not args_obj:
+                        args_obj = await args_from_graph_state(tool_use_id)
+                    payload = yield_tool_args(tool_use_id, tool_name, args_obj)
+                    if payload:
+                        yield payload
+                yield {
+                    "toolResult": chunk.content,
+                    "toolUseId": tool_use_id,
+                    "tool": tool_name,
+                }
+
+        for tool_use_id, args_raw in tool_input_list.items():
+            if not args_raw or tool_use_id in tool_args_by_id:
+                continue
+            try:
+                args_obj = json.loads(args_raw)
+            except json.JSONDecodeError:
+                continue
+            payload = yield_tool_args(
+                tool_use_id,
+                tool_name_by_id.get(tool_use_id, ""),
+                args_obj,
+            )
+            if payload:
+                yield payload
 
         if not result_text.strip():
             result_text = "답변을 찾지 못하였습니다."
@@ -321,8 +469,8 @@ async def agent_langgraph(payload):
         logger.info(f"final_output: {result_text[:200]!r}...")
         yield {"result": final_output}
     finally:
-        if history_mode == "Enable":
-            await chat.persist_checkpoint_to_session_storage()
+        chat.set_checkpoint_session_id(None)
+        await chat.persist_checkpoint_to_session_storage()
 
 if __name__ == "__main__":
     app.run()

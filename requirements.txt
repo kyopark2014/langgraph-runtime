@@ -1,7 +1,7 @@
 bedrock-agentcore
 bedrock-agentcore-starter-toolkit
-streamlit==1.41.0
-streamlit-chat
+fastapi
+uvicorn[standard]
 pandas
 numpy
 boto3
