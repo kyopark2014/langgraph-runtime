@@ -1,6 +1,7 @@
 bedrock-agentcore
 bedrock-agentcore-starter-toolkit
 fastapi
+python-multipart
 uvicorn[standard]
 pandas
 numpy
