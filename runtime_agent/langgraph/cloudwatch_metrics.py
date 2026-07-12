@@ -278,24 +278,6 @@ def _custom_metric_search_expression(
     )
 
 
-def _custom_model_metric_search_expression(
-    metric_name: str,
-    project_name: str,
-    period: int,
-    stat: str = "Sum",
-) -> str:
-    """SEARCH expression labeled by ModelId only.
-
-    AgentRuntimeName is omitted from the dimension list so CloudWatch legends
-    show model names only. Multiple runtimes using the same model are aggregated.
-    """
-    return (
-        f"SEARCH('{{{METRIC_NAMESPACE},ModelId}} "
-        f'ProjectName="{project_name}" MetricName="{metric_name}"\', '
-        f"'{stat}', {period})"
-    )
-
-
 def _custom_model_metric_query(
     metric_name: str,
     project_name: str,
@@ -303,11 +285,16 @@ def _custom_model_metric_query(
     metric_id: str = "e1",
     stat: str = "Sum",
 ) -> list[list[dict[str, Any]]]:
-    """SEARCH query with dynamic label showing ModelId only in legends."""
+    """SEARCH query with dynamic label showing ModelId only in legends.
+
+    Metrics are published with ProjectName, AgentRuntimeName, and ModelId.
+    Default SEARCH labels concatenate all dimension values
+    (e.g. "runtime_xxx claude-fable-5"); keep ModelId only.
+    """
     return [
         [
             {
-                "expression": _custom_model_metric_search_expression(
+                "expression": _custom_metric_search_expression(
                     metric_name, project_name, period, stat
                 ),
                 "label": "${PROP('Dim.ModelId')}",
