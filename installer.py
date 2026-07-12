@@ -30,6 +30,10 @@ AGENTCORE_GATEWAY_REGION = "us-east-1"
 AGENTCORE_WEBSEARCH_GATEWAY_NAME = "gateway-websearch"
 AGENTCORE_WEBSEARCH_TARGET_NAME = "websearch"
 git_name = "langgraph-runtime"
+# SSE streaming: long tool runs can go 30s+ without tokens; CloudFront/ALB must stay open.
+SSE_ORIGIN_READ_TIMEOUT_SECONDS = 120
+ALB_IDLE_TIMEOUT_SECONDS = 120
+
 
 
 def agent_runtime_name(project_name: str) -> str:
@@ -2767,6 +2771,7 @@ def create_alb(vpc_info: Dict[str, str]) -> Dict[str, str]:
         if albs["LoadBalancers"]:
             alb = albs["LoadBalancers"][0]
             logger.warning(f"ALB already exists: {alb['DNSName']}")
+            ensure_alb_idle_timeout(alb["LoadBalancerArn"])
             return {
                 "arn": alb["LoadBalancerArn"],
                 "dns": alb["DNSName"]
@@ -2850,6 +2855,7 @@ def create_alb(vpc_info: Dict[str, str]) -> Dict[str, str]:
     alb_dns = response["LoadBalancers"][0]["DNSName"]
     
     logger.info(f"✓ ALB created: {alb_dns}")
+    ensure_alb_idle_timeout(alb_arn)
     
     return {
         "arn": alb_arn,
@@ -3666,7 +3672,81 @@ def _reuse_cloudfront_distribution(dist: Dict) -> Dict[str, str]:
             f"Could not update CloudFront cache behaviors (reusing distribution anyway): {e}"
         )
 
+    try:
+        _ensure_cloudfront_alb_origin_timeouts(dist_id)
+    except Exception as e:
+        logger.warning(
+            f"Could not update CloudFront ALB origin timeouts (reusing distribution anyway): {e}"
+        )
+
     return {"id": dist_id, "domain": domain}
+
+def ensure_alb_idle_timeout(
+    alb_arn: str, timeout_seconds: int = ALB_IDLE_TIMEOUT_SECONDS
+) -> None:
+    """Raise ALB idle timeout so long SSE streams are not cut at 60s."""
+    try:
+        elbv2_client.modify_load_balancer_attributes(
+            LoadBalancerArn=alb_arn,
+            Attributes=[
+                {
+                    "Key": "idle_timeout.timeout_seconds",
+                    "Value": str(timeout_seconds),
+                }
+            ],
+        )
+        logger.info(f"  ✓ ALB idle timeout set to {timeout_seconds}s")
+    except ClientError as e:
+        logger.warning(f"Could not set ALB idle timeout: {e}")
+
+
+def _cloudfront_alb_custom_origin_config() -> Dict[str, object]:
+    return {
+        "HTTPPort": 80,
+        "HTTPSPort": 443,
+        "OriginProtocolPolicy": "http-only",
+        "OriginReadTimeout": SSE_ORIGIN_READ_TIMEOUT_SECONDS,
+        "OriginKeepaliveTimeout": 5,
+    }
+
+
+def _ensure_cloudfront_alb_origin_timeouts(
+    dist_id: str, timeout_seconds: int = SSE_ORIGIN_READ_TIMEOUT_SECONDS
+) -> None:
+    """Ensure CloudFront ALB origin read timeout supports long SSE tool runs."""
+    dist_config_response = cloudfront_client.get_distribution_config(Id=dist_id)
+    dist_config = dist_config_response["DistributionConfig"]
+    etag = dist_config_response["ETag"]
+
+    alb_origin_id = f"alb-{project_name}"
+    origins = dist_config.get("Origins", {}).get("Items", [])
+    updated = False
+    for origin in origins:
+        if origin.get("Id") != alb_origin_id:
+            continue
+        custom = origin.setdefault("CustomOriginConfig", {})
+        if custom.get("OriginReadTimeout") == timeout_seconds:
+            logger.info(
+                f"  CloudFront ALB origin read timeout already {timeout_seconds}s"
+            )
+            return
+        custom["OriginReadTimeout"] = timeout_seconds
+        custom.setdefault("OriginKeepaliveTimeout", 5)
+        updated = True
+        break
+
+    if not updated:
+        logger.warning(f"  CloudFront ALB origin {alb_origin_id} not found; skipping timeout update")
+        return
+
+    cloudfront_client.update_distribution(
+        Id=dist_id,
+        DistributionConfig=dist_config,
+        IfMatch=etag,
+    )
+    logger.info(f"  ✓ CloudFront ALB origin read timeout set to {timeout_seconds}s")
+    logger.warning("  Note: CloudFront origin timeout changes may take 15-20 minutes to deploy")
+
 
 
 def _cloudfront_s3_cache_behavior(path_pattern: str, s3_origin_id: str) -> Dict[str, object]:
@@ -3821,11 +3901,7 @@ def create_cloudfront_distribution(alb_info: Dict[str, str], s3_bucket_name: str
                 {
                     "Id": f"alb-{project_name}",
                     "DomainName": alb_info["dns"],
-                    "CustomOriginConfig": {
-                        "HTTPPort": 80,
-                        "HTTPSPort": 443,
-                        "OriginProtocolPolicy": "http-only"
-                    },
+                    "CustomOriginConfig": _cloudfront_alb_custom_origin_config(),
                     "CustomHeaders": {
                         "Quantity": 0,
                         "Items": []
@@ -4224,6 +4300,37 @@ def _ensure_docker_disk_space(min_free_mb: int = DOCKER_MIN_FREE_MB) -> None:
         )
 
 
+def _promote_ecr_image_tag(
+    repository_uri: str, source_tag: str, target_tag: str = "latest"
+) -> None:
+    """Point an ECR tag at an already-pushed manifest (avoids docker push :latest index conflicts)."""
+    repository_name = repository_uri.rsplit("/", 1)[-1]
+    response = ecr_client.batch_get_image(
+        repositoryName=repository_name,
+        imageIds=[{"imageTag": source_tag}],
+        acceptedMediaTypes=[
+            "application/vnd.docker.distribution.manifest.v2+json",
+            "application/vnd.oci.image.manifest.v1+json",
+        ],
+    )
+    images = response.get("images") or []
+    if not images:
+        raise RuntimeError(
+            f"ECR image not found for tag {source_tag} in repository {repository_name}"
+        )
+    image = images[0]
+    put_params: Dict[str, str] = {
+        "repositoryName": repository_name,
+        "imageTag": target_tag,
+        "imageManifest": image["imageManifest"],
+    }
+    media_type = image.get("imageManifestMediaType")
+    if media_type:
+        put_params["imageManifestMediaType"] = media_type
+    ecr_client.put_image(**put_params)
+    logger.info(f"  ✓ Promoted ECR tag {source_tag} -> {target_tag}")
+
+
 def build_and_push_docker_image(
     repository_uri: str, image_tag: Optional[str] = None
 ) -> Tuple[str, str]:
@@ -4240,7 +4347,6 @@ def build_and_push_docker_image(
 
     registry = repository_uri.split("/")[0]
     image_uri = f"{repository_uri}:{image_tag}"
-    latest_uri = f"{repository_uri}:latest"
     project_root = os.path.dirname(os.path.abspath(__file__))
 
     logger.info(f"  Build number (image tag): {image_tag}")
@@ -4283,16 +4389,13 @@ def build_and_push_docker_image(
     )
     logger.info("  ✓ Docker build completed")
 
-    _run_command_streaming(["docker", "tag", image_uri, latest_uri])
-    logger.info(f"  Tagged image as latest: {latest_uri}")
-
     logger.info(f"  Starting Docker push: {image_uri}")
     _run_command_streaming(["docker", "push", image_uri])
-    logger.info(f"  Starting Docker push: {latest_uri}")
-    _run_command_streaming(["docker", "push", latest_uri])
+    logger.info(f"  Promoting {image_tag} to latest in ECR (avoid stale manifest list push)")
+    _promote_ecr_image_tag(repository_uri, image_tag, "latest")
     logger.info(f"  ✓ Pushed image: {image_uri}")
 
-    subprocess.run(["docker", "rmi", "-f", image_uri, latest_uri], capture_output=True, check=False)
+    subprocess.run(["docker", "rmi", "-f", image_uri], capture_output=True, check=False)
     _cleanup_docker_resources()
     return image_uri, image_tag
 

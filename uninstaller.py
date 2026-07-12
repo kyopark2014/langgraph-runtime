@@ -1707,11 +1707,11 @@ def delete_iam_roles(delete_agentcore_gateway_role: bool = True):
         f"role-s3files-sync-for-{project_name}",
     ]
     if delete_agentcore_gateway_role:
-        role_names.append("role-agentcore-gateway-websearch-for-langgraph-runtime")
+        role_names.append(f"role-agentcore-gateway-websearch-for-{project_name}")
     else:
         logger.info(
             "  Keeping AgentCore gateway IAM role "
-            "(role-agentcore-gateway-websearch-for-langgraph-runtime)"
+            f"(role-agentcore-gateway-websearch-for-{project_name})"
         )
     
     for role_name in role_names:
