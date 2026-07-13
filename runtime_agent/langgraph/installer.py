@@ -122,7 +122,7 @@ def _load_application_config() -> dict:
 
 
 def _parse_s3_vectors_names(vector_bucket_arn: str, index_arn: str) -> dict:
-    """Derive vector bucket/index names from S3 Vectors ARNs."""
+    """Derive vector bucket/index names from S3 Vectors ARNs (legacy)."""
     vector_bucket_name = ""
     vector_index_name = ""
     if vector_bucket_arn and "/bucket/" in vector_bucket_arn:
@@ -133,6 +133,17 @@ def _parse_s3_vectors_names(vector_bucket_arn: str, index_arn: str) -> dict:
         "vector_bucket_name": vector_bucket_name,
         "vector_index_name": vector_index_name,
     }
+
+
+def _opensearch_endpoint_from_collection_arn(collection_arn: str, region: str) -> str:
+    """Best-effort OpenSearch Serverless endpoint from collection ARN."""
+    # arn:aws:aoss:region:account:collection/collection-id
+    if not collection_arn or ":collection/" not in collection_arn:
+        return ""
+    collection_id = collection_arn.rsplit(":collection/", 1)[1]
+    if not collection_id:
+        return ""
+    return f"https://{collection_id}.{region}.aoss.amazonaws.com"
 
 
 def _find_data_source_id(bedrock_agent_client, knowledge_base_id: str, s3_bucket_name: str = "") -> str:
@@ -196,6 +207,8 @@ def update_knowledge_base_config() -> bool:
                 "s3_bucket",
                 "s3_arn",
                 "sharing_url",
+                "collectionArn",
+                "opensearch_url",
                 "vector_bucket_name",
                 "vector_bucket_arn",
                 "vector_index_name",
@@ -226,11 +239,24 @@ def update_knowledge_base_config() -> bool:
             "knowledge_base_role": knowledge_base.get("roleArn", ""),
             "collectionArn": "",
             "opensearch_url": "",
+            "vector_bucket_name": "",
+            "vector_bucket_arn": "",
+            "vector_index_name": "",
+            "vector_index_arn": "",
         }
  
         storage = knowledge_base.get("storageConfiguration", {})
         storage_type = storage.get("type", "")
-        if storage_type == "S3_VECTORS":
+        if storage_type == "OPENSEARCH_SERVERLESS":
+            opensearch_cfg = storage.get("opensearchServerlessConfiguration", {})
+            collection_arn = opensearch_cfg.get("collectionArn", "")
+            updates["collectionArn"] = collection_arn
+            updates["vector_index_name"] = opensearch_cfg.get("vectorIndexName", "")
+            updates["opensearch_url"] = (
+                app_config.get("opensearch_url")
+                or _opensearch_endpoint_from_collection_arn(collection_arn, region)
+            )
+        elif storage_type == "S3_VECTORS":
             s3_vectors_cfg = storage.get("s3VectorsConfiguration", {})
             vector_bucket_arn = s3_vectors_cfg.get("vectorBucketArn", "")
             vector_index_arn = s3_vectors_cfg.get("indexArn", "")
@@ -243,19 +269,14 @@ def update_knowledge_base_config() -> bool:
                     "vector_index_name": parsed_names["vector_index_name"],
                 }
             )
-        elif storage_type == "OPENSEARCH_SERVERLESS":
-            opensearch_cfg = storage.get("opensearchServerlessConfiguration", {})
-            updates["collectionArn"] = opensearch_cfg.get("collectionArn", "")
-            updates["vector_bucket_name"] = ""
-            updates["vector_bucket_arn"] = ""
-            updates["vector_index_name"] = ""
-            updates["vector_index_arn"] = ""
 
         for key in (
             "s3_bucket",
             "s3_arn",
             "sharing_url",
             "data_source_id",
+            "collectionArn",
+            "opensearch_url",
             "vector_bucket_name",
             "vector_bucket_arn",
             "vector_index_name",
@@ -284,6 +305,10 @@ def update_knowledge_base_config() -> bool:
         print(f"  - knowledge_base_id: {updates.get('knowledge_base_id', '')}")
         if updates.get("data_source_id"):
             print(f"  - data_source_id: {updates['data_source_id']}")
+        if updates.get("collectionArn"):
+            print(f"  - collectionArn: {updates['collectionArn']}")
+        if updates.get("opensearch_url"):
+            print(f"  - opensearch_url: {updates['opensearch_url']}")
         if updates.get("vector_index_arn"):
             print(f"  - vector_index_arn: {updates['vector_index_arn']}")
         return True
