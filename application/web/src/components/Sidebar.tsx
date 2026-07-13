@@ -1,10 +1,11 @@
+import { useRef } from "react";
 import { formatBrandTitle } from "../formatBrandTitle";
 import type { AppConfig, Task } from "../types";
 import { ConfigDrawer } from "./ConfigDrawer";
 import { TaskListItem } from "./TaskListItem";
 import { GuardrailIcon, LogoutIcon, McpIcon, ModelIcon, NewTaskIcon, SkillIcon, CloseIcon } from "./SidebarIcons";
 
-type DrawerKind = "skill" | "mcp" | null;
+type DrawerKind = "skill" | "mcp" | "model" | null;
 
 interface Props {
   userId: string;
@@ -39,8 +40,12 @@ export function Sidebar({
   onDeleteTask,
   onLogout,
 }: Props) {
+  const skillBtnRef = useRef<HTMLButtonElement>(null);
+  const mcpBtnRef = useRef<HTMLButtonElement>(null);
+  const modelBtnRef = useRef<HTMLButtonElement>(null);
   const skills = activeTask?.skills ?? config?.default_skills ?? [];
   const mcpServers = activeTask?.mcp_servers ?? config?.default_mcp_servers ?? [];
+  const modelName = activeTask?.model_name ?? config?.default_model ?? "";
   const brandTitle = formatBrandTitle(config?.projectName ?? "agent", userId);
   const pinnedTasks = tasks.filter((task) => task.pinned);
   const regularTasks = tasks.filter((task) => !task.pinned);
@@ -58,6 +63,10 @@ export function Sidebar({
         onTogglePin={() => onPatchTask(task.id, { pinned: !task.pinned })}
       />
     );
+  }
+
+  function toggleDrawer(kind: Exclude<DrawerKind, null>) {
+    onOpenDrawer(drawer === kind ? null : kind);
   }
 
   return (
@@ -111,40 +120,42 @@ export function Sidebar({
         <div className="sidebar-section">
           <div className="section-label">Configuration</div>
           <button
+            ref={skillBtnRef}
             type="button"
-            className="sidebar-menu-btn"
-            onClick={() => onOpenDrawer("skill")}
+            className={`sidebar-menu-btn${drawer === "skill" ? " is-active" : ""}`}
+            aria-expanded={drawer === "skill"}
+            aria-haspopup="dialog"
+            onClick={() => toggleDrawer("skill")}
             disabled={!activeTask}
           >
             <SkillIcon className="sidebar-icon" />
             <span>Skill ({skills.length})</span>
           </button>
           <button
+            ref={mcpBtnRef}
             type="button"
-            className="sidebar-menu-btn"
-            onClick={() => onOpenDrawer("mcp")}
+            className={`sidebar-menu-btn${drawer === "mcp" ? " is-active" : ""}`}
+            aria-expanded={drawer === "mcp"}
+            aria-haspopup="dialog"
+            onClick={() => toggleDrawer("mcp")}
             disabled={!activeTask}
           >
             <McpIcon className="sidebar-icon" />
             <span>MCP ({mcpServers.length})</span>
           </button>
-          <label className="sidebar-menu-btn model-select-row">
+          <button
+            ref={modelBtnRef}
+            type="button"
+            className={`sidebar-menu-btn${drawer === "model" ? " is-active" : ""}`}
+            aria-expanded={drawer === "model"}
+            aria-haspopup="dialog"
+            title={modelName || "Model"}
+            onClick={() => toggleDrawer("model")}
+            disabled={!activeTask}
+          >
             <ModelIcon className="sidebar-icon" />
-            <select
-              className="model-select"
-              value={activeTask?.model_name ?? config?.default_model ?? ""}
-              disabled={!activeTask}
-              onChange={(e) =>
-                activeTask && onPatchTask(activeTask.id, { model_name: e.target.value })
-              }
-            >
-              {(config?.models ?? []).map((model) => (
-                <option key={model} value={model}>
-                  {model}
-                </option>
-              ))}
-            </select>
-          </label>
+            <span>{modelName || "Model"}</span>
+          </button>
         </div>
 
         <div className="sidebar-section">
@@ -170,6 +181,7 @@ export function Sidebar({
           title="Skill"
           options={config.skills}
           selected={skills}
+          anchorEl={skillBtnRef.current}
           onChange={(next) => activeTask && onPatchTask(activeTask.id, { skills: next })}
           onClose={onCloseDrawer}
         />
@@ -179,7 +191,21 @@ export function Sidebar({
           title="MCP"
           options={config.mcp_servers}
           selected={mcpServers}
+          anchorEl={mcpBtnRef.current}
           onChange={(next) => activeTask && onPatchTask(activeTask.id, { mcp_servers: next })}
+          onClose={onCloseDrawer}
+        />
+      )}
+      {drawer === "model" && config && activeTask && (
+        <ConfigDrawer
+          title="Model"
+          options={config.models}
+          selected={modelName ? [modelName] : []}
+          mode="single"
+          anchorEl={modelBtnRef.current}
+          onChange={(next) =>
+            activeTask && next[0] && onPatchTask(activeTask.id, { model_name: next[0] })
+          }
           onClose={onCloseDrawer}
         />
       )}
