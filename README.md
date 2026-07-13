@@ -57,7 +57,6 @@ flowchart TB
     WF["web_fetch npx"]
     IG[image generation]
     KW[korea_weather]
-    UC["user config"]
   end
 
   subgraph MCPClient["langchain mcp adapters"]
@@ -103,7 +102,7 @@ flowchart TB
 | MCP (로컬 stdio / Gateway) | `mcp_config.py`, `mcp_server_*.py`, websearch Gateway | stdio subprocess 또는 AgentCore Gateway MCP |
 | Web UI | 루트 `Dockerfile` → ECS | FastAPI + React SPA. Agent 추론은 AgentCore에서 수행 |
 
-UI에서 MCP는 `application/mcp.list` 기준으로 `knowledge base`, `aws documentation`, `trade info`, `websearch`, `web_fetch`, `image generation`, `korea_weather`, `사용자 설정` 등을 선택합니다. Skill은 `application/skills.list`에서 `docx`, `pptx`, `xlsx`, `skill-creator`, `seoul-subway` 등을 별도로 선택합니다. UI는 `agentcore_client.run_agent`로 AgentCore Runtime에 직접 요청합니다.
+UI에서 MCP는 `application/mcp.list` 기준으로 `knowledge base`, `aws documentation`, `trade info`, `websearch`, `web_fetch`, `image generation`, `korea_weather` 등을 선택합니다. Skill은 `application/skills.list`에서 `docx`, `pptx`, `xlsx`, `skill-creator`, `seoul-subway` 등을 별도로 선택합니다. UI는 `agentcore_client.run_agent`로 AgentCore Runtime에 직접 요청합니다.
 
 ### 네트워크 설정
 
@@ -691,7 +690,7 @@ runtime_agent/langgraph/
 ├── test_runtime_remote.py  # Runtime 원격 invoke 테스트
 ├── mcp.list                # 지원 MCP 목록
 ├── skills.list             # 지원 Skill 목록
-├── mcp.env                 # 사용자 설정 MCP 환경 변수 예시
+├── mcp.env                 # MCP 환경 변수 예시
 ├── Dockerfile              # AgentCore Runtime 컨테이너 이미지
 ├── config.json             # Knowledge Base ID, region, projectName 등
 └── skills/                 # Skill 정의 (아래 참조)
@@ -714,7 +713,7 @@ runtime_agent/langgraph/
 | **인증·모델** | `agentcore_sigv4_auth.py`, `bedrock_data_retention.py`, `info.py` | Gateway SigV4, Mantle bearer token, 모델 프로필 |
 | **설정·배포** | `utils.py`, `installer.py`, `config.json` | AWS 리소스 연동, Secrets Manager, Runtime/IAM 배포 |
 
-**MCP 목록 (`mcp.list`)**: knowledge base, aws documentation, trade info, websearch, web_fetch, image generation, 사용자 설정
+**MCP 목록 (`mcp.list`)**: knowledge base, aws documentation, trade info, websearch, web_fetch, image generation, korea_weather
 
 **Skill 목록 (`skills.list`)**: docx, pdf, pptx, xlsx, skill-creator, seoul-subway
 
