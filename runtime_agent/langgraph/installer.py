@@ -326,8 +326,10 @@ def create_bedrock_agentcore_policy(config):
                     "bedrock-mantle:List*",
                     "bedrock-mantle:CreateInference"
                 ],
+                # OpenAI Mantle models (e.g. gpt-5.5) call us-east-1/2 even when
+                # the AgentCore runtime itself runs in config['region'].
                 "Resource": [
-                    f"arn:aws:bedrock-mantle:{region}:{accountId}:project/*"
+                    f"arn:aws:bedrock-mantle:*:{accountId}:project/*"
                 ]
             },
             {
