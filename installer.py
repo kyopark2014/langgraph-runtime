@@ -6535,6 +6535,7 @@ def _get_or_create_s3files_sync_role(s3_bucket_arn: str) -> str:
         ],
     }
 
+    created = False
     try:
         role = iam_client.get_role(RoleName=role_name)
         role_arn = role["Role"]["Arn"]
@@ -6550,6 +6551,7 @@ def _get_or_create_s3files_sync_role(s3_bucket_arn: str) -> str:
             Description=f"S3 Files sync role for {project_name}",
         )
         role_arn = role["Role"]["Arn"]
+        created = True
         logger.info(f"  Created S3 Files sync role: {role_arn}")
 
     for policy_name, policy_document in (
@@ -6561,6 +6563,14 @@ def _get_or_create_s3files_sync_role(s3_bucket_arn: str) -> str:
             PolicyName=policy_name,
             PolicyDocument=json.dumps(policy_document),
         )
+
+    # Fresh IAM roles can take a few seconds to become assumable by S3 Files.
+    if created:
+        wait_seconds = 15
+        logger.info(
+            f"  Waiting {wait_seconds}s for IAM role propagation: {role_name}"
+        )
+        time.sleep(wait_seconds)
 
     return role_arn
 
