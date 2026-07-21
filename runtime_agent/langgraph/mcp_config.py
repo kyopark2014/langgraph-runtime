@@ -56,7 +56,17 @@ def load_config(mcp_type):
     elif mcp_type == "image generation":
         mcp_type = "image_generation"
     
-    if mcp_type == "aws_documentation":
+    if mcp_type == "use-aws":
+        return {
+            "mcpServers": {
+                "use-aws": {
+                    "command": "python",
+                    "args": [f"{workingDir}/mcp_server_use_aws.py"],
+                }
+            }
+        }
+
+    elif mcp_type == "aws_documentation":
         return {
             "mcpServers": {
                 "awslabs.aws-documentation-mcp-server": {
