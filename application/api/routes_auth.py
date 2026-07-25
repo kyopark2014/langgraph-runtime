@@ -1,3 +1,6 @@
+import logging
+from urllib.parse import urlparse
+
 from fastapi import APIRouter, HTTPException, Request, Response
 from pydantic import BaseModel, Field
 
@@ -5,6 +8,8 @@ try:
     from application import cloudfront_cookies
 except ImportError:
     import cloudfront_cookies
+
+logger = logging.getLogger("routes_auth")
 
 router = APIRouter(prefix="/api/session", tags=["session"])
 
@@ -21,8 +26,33 @@ class SessionResponse(BaseModel):
 
 
 def _cookie_secure(request: Request) -> bool:
-    proto = (request.headers.get("x-forwarded-proto") or request.url.scheme or "").lower()
-    return proto == "https"
+    # CloudFront→ALB is http-only, so ALB's X-Forwarded-Proto is often "http"
+    # even when the viewer used HTTPS. Prefer CloudFront's viewer proto, then
+    # treat CloudFront / sharing_url hosts as HTTPS viewers.
+    proto = (
+        request.headers.get("cloudfront-forwarded-proto")
+        or request.headers.get("x-forwarded-proto")
+        or request.url.scheme
+        or ""
+    ).lower()
+    if proto == "https":
+        return True
+    host = (request.headers.get("host") or request.url.hostname or "").split(":")[0].lower()
+    if host.endswith(".cloudfront.net"):
+        return True
+    try:
+        try:
+            from application import utils
+        except ImportError:
+            import utils
+
+        sharing = (utils.load_config().get("sharing_url") or "").strip()
+        parsed = urlparse(sharing)
+        if parsed.scheme == "https" and (parsed.hostname or "").lower() == host:
+            return True
+    except Exception:
+        pass
+    return False
 
 
 def _set_user_cookie(response: Response, request: Request, user_id: str) -> None:
@@ -35,9 +65,12 @@ def _set_user_cookie(response: Response, request: Request, user_id: str) -> None
         secure=secure,
         max_age=SESSION_MAX_AGE,
     )
-    cloudfront_cookies.set_signed_cookies(
+    if not cloudfront_cookies.set_signed_cookies(
         response, secure=secure, max_age=SESSION_MAX_AGE
-    )
+    ):
+        logger.warning(
+            "CloudFront signed cookies not attached on login (signing material missing?)"
+        )
 
 
 @router.post("", response_model=SessionResponse)
@@ -54,11 +87,15 @@ def get_session(request: Request, response: Response) -> SessionResponse | None:
     user_id = (request.cookies.get(SESSION_COOKIE) or "").strip()
     if not user_id:
         return None
-    cloudfront_cookies.set_signed_cookies(
+    if not cloudfront_cookies.set_signed_cookies(
         response,
         secure=_cookie_secure(request),
         max_age=SESSION_MAX_AGE,
-    )
+    ):
+        logger.warning(
+            "CloudFront signed cookies not attached on session refresh "
+            "(signing material missing?)"
+        )
     return SessionResponse(user_id=user_id)
 
 
