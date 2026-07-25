@@ -46,6 +46,7 @@ agentcore_control_client = boto3.client(
     region_name=AGENTCORE_GATEWAY_REGION,
 )
 s3files_client = boto3.client("s3files", region_name=region)
+secretsmanager_client = boto3.client("secretsmanager", region_name=region)
 
 # Get account ID if not set
 if not account_id:
@@ -54,6 +55,7 @@ if not account_id:
 bucket_name = f"storage-for-{project_name}-{account_id}-{region}"
 vector_index_name = project_name
 vector_bucket_name = f"{project_name}-{account_id}"
+ALB_ORIGIN_HEADER_SECRET_NAME = f"{project_name}/cloudfront-alb-origin-header"
 
 # Configure logging
 def setup_logging():
@@ -2086,6 +2088,25 @@ def uninstall_agent_runtime(runtime_type: str = "langgraph") -> bool:
         logger.error(f"Error uninstalling Agent Runtime ({runtime_type}): {e}")
         return False
 
+
+def delete_alb_origin_header_secret() -> None:
+    """Delete CloudFront→ALB origin verification header from Secrets Manager."""
+    logger.info("Deleting ALB origin header secret")
+    secret_name = ALB_ORIGIN_HEADER_SECRET_NAME
+    try:
+        secretsmanager_client.delete_secret(
+            SecretId=secret_name,
+            ForceDeleteWithoutRecovery=True,
+        )
+        logger.info(f"  ✓ Deleted Secrets Manager secret: {secret_name}")
+    except ClientError as e:
+        code = e.response.get("Error", {}).get("Code", "")
+        if code in ("ResourceNotFoundException", "ResourceNotFound"):
+            logger.info(f"  Secret not found: {secret_name}")
+        else:
+            logger.warning(f"  Could not delete secret {secret_name}: {e}")
+
+
 def main():
     """Main function to delete all infrastructure."""
     parser = argparse.ArgumentParser(description="AWS Infrastructure Uninstaller")
@@ -2154,6 +2175,7 @@ def main():
         agentcore_gateway_deleted = delete_agentcore_websearch_gateway(
             skip_confirmation=args.delete_agentcore_gateway
         )
+        delete_alb_origin_header_secret()
         delete_iam_roles(delete_agentcore_gateway_role=agentcore_gateway_deleted)
         delete_s3_buckets()
         delete_disabled_cloudfront_distributions()

@@ -78,9 +78,12 @@ S3_FILES_SESSION_PREFIX = "agentcore-sessions/"
 # AgentCore Runtime 이름: project_name의 '-' → '_' (예: langgraph_runtime)
 # agent_runtime_name(project_name)
 
-# 커스텀 헤더 (CloudFront-ALB 통신용)
+# CloudFront→ALB 오리진 검증 헤더
 custom_header_name = "X-Custom-Header"
-custom_header_value = f"{project_name}_12dab15e4s31"
+# 값은 소스에 두지 않음. Secrets Manager:
+#   {project_name}/cloudfront-alb-origin-header
+# get_or_create_alb_origin_header()가 최초 배포 시 랜덤 생성·이후 재사용
+ALB_ORIGIN_HEADER_SECRET_NAME = f"{project_name}/cloudfront-alb-origin-header"
 ```
 
 ---
@@ -163,15 +166,21 @@ Runtime(`runtime_agent/langgraph/installer.py`)은 access point ARN이 있으면
 - **헬스체크**: `/api/health`
 - **Idle timeout**: 120초 (`ALB_IDLE_TIMEOUT_SECONDS`) — 장시간 SSE 스트림 유지
 - **Stickiness**: `lb_cookie` 86400초 (태스크별 SQLite working-copy 일관성)
+- **Origin 보호**: listener default = **403 fixed-response**, `X-Custom-Header` 일치 시에만 ECS target group으로 forward (`ensure_alb_listener_origin_protection`)
 
 ### 6. CloudFront 배포
 - **오리진**:
-  - 기본: ALB (동적 컨텐츠)
+  - 기본: ALB (동적 컨텐츠) — Secrets Manager 오리진 헤더를 Custom Header로 주입
   - `/images/*`, `/docs/*`, `/artifacts/*`: S3 (정적 컨텐츠)
 - **캐시 정책**: Managed-CachingDisabled
 - **프로토콜**: HTTP → HTTPS 리다이렉트
 - **Origin read timeout**: 120초 (`SSE_ORIGIN_READ_TIMEOUT_SECONDS`)
-- **재사용**: 동일 `project_name`의 기존 CloudFront 배포가 있으면 재사용 (타임아웃·`/artifacts/*` behavior 갱신)
+- **재사용**: 동일 `project_name`의 기존 CloudFront 배포가 있으면 재사용 (헤더·타임아웃·`/artifacts/*` behavior 갱신)
+
+### 6.5. Secrets Manager (ALB origin header)
+- **이름**: `{project_name}/cloudfront-alb-origin-header`
+- **용도**: CloudFront → ALB 오리진 검증용 `X-Custom-Header` 값 (랜덤, 소스 하드코딩 없음)
+- **생성**: `get_or_create_alb_origin_header()` / 삭제: `uninstaller.delete_alb_origin_header_secret()`
 
 ### 7. ECR (Elastic Container Registry)
 - **리포지토리**: `ecr-for-{project_name}`
@@ -258,8 +267,11 @@ S3 Vectors 벡터 버킷·인덱스 생성 및 Bedrock Knowledge Base 연결
 VPC·ALB·CloudFront 생성
 
 - VPC: Bedrock Runtime + `ensure_private_subnet_vpc_endpoints()` (ECR, Logs, Secrets, AgentCore, S3 gateway)
-- ALB: `ensure_alb_idle_timeout()` (120초)
-- CloudFront: ALB origin read timeout 120초, `/images/*`·`/docs/*`·`/artifacts/*` S3 behavior, 기존 배포 재사용 로직
+- ALB: `ensure_alb_idle_timeout()` (120초), SG는 CloudFront prefix list만 허용
+- CloudFront: ALB 오리진에 `X-Custom-Header` 주입, origin read timeout 120초, `/images/*`·`/docs/*`·`/artifacts/*`
+
+#### `get_or_create_alb_origin_header()` / `ensure_alb_listener_origin_protection()`
+Secrets Manager에 오리진 헤더 시크릿을 생성·재사용하고, ALB listener를 default 403 + 헤더 일치 시 forward로 맞춤
 
 #### `create_s3_files_session_storage(vpc_info, s3_bucket_name, *, ecs_sg_id="", ecs_task_role_name="")`
 AgentCore·ECS용 S3 Files 세션 스토리지 프로비저닝 (멱등).
@@ -332,7 +344,9 @@ AgentCore Web Search gateway 및 managed web-search 타겟 생성/조회
 | `create_security_group()` / `create_vpc_endpoint()` | 보안 그룹·Interface VPC 엔드포인트 생성 |
 | `create_s3_gateway_vpc_endpoint()` / `ensure_private_subnet_vpc_endpoints()` | S3 Gateway + ECR/Logs/Secrets/AgentCore 엔드포인트 |
 | `ensure_alb_idle_timeout()` | ALB idle timeout 120초 |
-| `_ensure_cloudfront_alb_origin_timeouts()` / `_ensure_cloudfront_s3_path_behavior()` | CF 타임아웃·S3 path behavior |
+| `get_or_create_alb_origin_header()` | Secrets Manager 오리진 헤더 생성·재사용 |
+| `ensure_alb_listener_origin_protection()` | ALB default 403 + 커스텀 헤더 forward |
+| `_ensure_cloudfront_alb_origin_config()` / `_ensure_cloudfront_s3_path_behavior()` | CF 헤더·타임아웃·S3 path |
 | `_ensure_s3_bucket_versioning_enabled()` | S3 bucket versioning Enabled (S3 Files 필수) |
 | `_get_or_create_s3files_sync_role()` | S3 Files sync IAM role |
 | `_get_or_create_s3files_file_system()` | S3 Files file system (prefix `agentcore-sessions/`) |
@@ -348,7 +362,7 @@ AgentCore Web Search gateway 및 managed web-search 타겟 생성/조회
 | `wait_for_subnet_available()` / `wait_for_nat_gateway()` | 리소스 가용 상태 대기 |
 | `create_ecs_log_group()` / `create_ecs_cluster()` / `ensure_ecs_service_linked_role()` | ECS 로그·클러스터·SLR |
 | `create_alb_target_group_for_ecs()` | Fargate용 IP 타겟 그룹 + stickiness |
-| `create_alb_listener_with_target_group()` | ALB 리스너·커스텀 헤더 규칙 |
+| `create_alb_listener_with_target_group()` | ALB 리스너·오리진 헤더 보호 규칙 |
 | `_wait_for_ecs_service_ready()` | ECS 서비스/타겟 안정화 대기 |
 | `_require_arm64_build_host()` | ARM64 EC2에서만 Docker 빌드 허용 |
 | `_ensure_native_buildx_builder()` / `_ensure_docker_disk_space()` | buildx·디스크 공간 준비 |
