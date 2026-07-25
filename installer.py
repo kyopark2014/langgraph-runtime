@@ -885,13 +885,53 @@ def create_ecs_roles() -> Dict[str, str]:
 
 
 def _get_installer_iam_arn() -> str:
-    """Return IAM ARN for the credentials running this installer."""
+    """Return IAM ARN for the credentials running this installer.
+
+    Assumed-role sessions (including IAM Identity Center / SSO) are normalized
+    to the underlying role ARN, including the role path. A path-less
+    ``role/{name}`` ARN is wrong for SSO roles such as
+    ``role/aws-reserved/sso.amazonaws.com/.../AWSReservedSSO_*``.
+    """
     identity = sts_client.get_caller_identity()
     arn = identity["Arn"]
     if ":assumed-role/" in arn:
         role_name = arn.split(":assumed-role/")[1].split("/")[0]
-        return f"arn:aws:iam::{identity['Account']}:role/{role_name}"
+        try:
+            return iam_client.get_role(RoleName=role_name)["Role"]["Arn"]
+        except ClientError as e:
+            logger.warning(
+                f"  Could not resolve full role ARN for {role_name}: {e}; "
+                f"falling back to path-less role ARN"
+            )
+            return f"arn:aws:iam::{identity['Account']}:role/{role_name}"
     return arn
+
+
+def _opensearch_identity_center_role_arns() -> List[str]:
+    """IAM Identity Center (SSO) role ARNs used for AWS Console login.
+
+    Dashboards authenticate as the console principal, which is often an
+    ``AWSReservedSSO_*`` role even when the installer itself runs with IAM
+    user access keys. Including these roles (not account root) keeps
+    Dashboards accessible without widening to ``arn:aws:iam::*:root``.
+    """
+    role_arns: List[str] = []
+    try:
+        paginator = iam_client.get_paginator("list_roles")
+        for page in paginator.paginate(
+            PathPrefix="/aws-reserved/sso.amazonaws.com/"
+        ):
+            for role in page.get("Roles", []):
+                arn = role.get("Arn")
+                name = role.get("RoleName", "")
+                if arn and name.startswith("AWSReservedSSO_"):
+                    role_arns.append(arn)
+    except ClientError as e:
+        logger.warning(
+            f"  Could not list IAM Identity Center roles for OpenSearch "
+            f"Dashboards access: {e}"
+        )
+    return role_arns
 
 
 def _opensearch_data_access_principals(
@@ -901,6 +941,7 @@ def _opensearch_data_access_principals(
     """Principals that need OpenSearch Serverless data-plane access."""
     principals = [
         _get_installer_iam_arn(),
+        *_opensearch_identity_center_role_arns(),
     ]
     if knowledge_base_role_arn:
         principals.append(knowledge_base_role_arn)
@@ -959,7 +1000,7 @@ def _ensure_opensearch_data_access_principals(
     knowledge_base_role_arn: Optional[str] = None,
     ec2_role_arn: Optional[str] = None,
 ) -> None:
-    """Ensure data access policy grants installer, KB, and optional EC2 roles."""
+    """Ensure data access policy grants installer, SSO console, KB, and optional EC2 roles."""
     principals_to_add = _opensearch_data_access_principals(
         knowledge_base_role_arn, ec2_role_arn
     )
@@ -3509,7 +3550,8 @@ def create_vector_index_in_opensearch(collection_endpoint: str, index_name: str)
             if response.status_code == 401:
                 logger.error(
                     "  Unauthorized (401) accessing OpenSearch. "
-                    f"Ensure {_get_installer_iam_arn()} is in the collection data access policy."
+                    f"Ensure {_get_installer_iam_arn()} (and any IAM Identity Center "
+                    "console roles) are in the collection data access policy."
                 )
                 return False
             if response.status_code == 403:
