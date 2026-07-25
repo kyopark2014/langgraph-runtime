@@ -1760,6 +1760,7 @@ SG만으로는 공격자가 **자체 CloudFront**를 ALB DNS에 연결해 우회
 | 항목 | 내용 |
 |------|------|
 | 대상 behavior | `/artifacts/*`, `/docs/*`, `/images/*` — `TrustedKeyGroups` 필수 |
+| S3 bucket policy | OAI `s3:GetObject`는 `images/*`·`docs/*`·`artifacts/*`만 (bucket 전체 `/*` 아님) |
 | 키 재료 | Secrets Manager `{project_name}/cloudfront-signing-key` (RSA) → CloudFront Public Key + Key Group |
 | ECS | env `CLOUDFRONT_KEY_PAIR_ID`, `CLOUDFRONT_SIGNING_PRIVATE_KEY` |
 | 쿠키 | 로그인·세션 조회 시 `CloudFront-Policy` / `CloudFront-Signature` / `CloudFront-Key-Pair-Id` 발급 (로그아웃 시 삭제) |
