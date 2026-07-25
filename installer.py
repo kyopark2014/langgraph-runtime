@@ -260,6 +260,45 @@ def get_or_create_alb_origin_header(*, rotate: bool = False) -> str:
         raise
 
 
+def _describe_secret_arn(secret_id: str) -> str:
+    """Return the full Secrets Manager ARN (includes random suffix)."""
+    return secretsmanager_client.describe_secret(SecretId=secret_id)["ARN"]
+
+
+def _ecs_secret_value_from(secret_name: str, *, json_key: Optional[str] = None) -> str:
+    """Build ECS containerSecrets valueFrom (ARN or ARN:json_key::)."""
+    arn = _describe_secret_arn(secret_name)
+    if json_key:
+        return f"{arn}:{json_key}::"
+    return arn
+
+
+def _ecs_execution_secrets_policy_document() -> Dict:
+    """Allow ECS task execution role to inject project secrets into containers."""
+    return {
+        "Version": "2012-10-17",
+        "Statement": [
+            {
+                "Sid": "ReadProjectSecretsForEcsInjection",
+                "Effect": "Allow",
+                "Action": ["secretsmanager:GetSecretValue"],
+                "Resource": [
+                    f"arn:aws:secretsmanager:{region}:{account_id}:secret:{project_name}/cloudfront-signing-key*",
+                ],
+            }
+        ],
+    }
+
+
+def attach_ecs_execution_secrets_policy(execution_role_name: str) -> None:
+    attach_inline_policy(
+        execution_role_name,
+        f"ecs-execution-secrets-for-{project_name}",
+        _ecs_execution_secrets_policy_document(),
+    )
+    logger.info(f"  ✓ ECS execution role can read project secrets: {execution_role_name}")
+
+
 def _alb_forbidden_default_action() -> Dict:
     """ALB default action: deny requests missing the origin header."""
     return {
@@ -952,6 +991,8 @@ def create_ecs_roles() -> Dict[str, str]:
 
     for policy in _get_ecs_task_inline_policies():
         attach_inline_policy(task_role_name, policy["name"], policy["document"])
+
+    attach_ecs_execution_secrets_policy(execution_role_name)
 
     return {
         "task_role_arn": task_role_arn,
@@ -6260,6 +6301,10 @@ def deploy_ecs_service(
     if not origin_header_value:
         origin_header_value = get_or_create_alb_origin_header(rotate=False)
 
+    execution_role_name = f"role-ecs-execution-for-{project_name}-{region}"
+    attach_ecs_execution_secrets_policy(execution_role_name)
+    cf_signing = get_or_create_cloudfront_signing_material(rotate=False)
+
     ensure_ecs_service_linked_role()
 
     if not vpc_info.get("ecs_sg_id"):
@@ -6279,7 +6324,6 @@ def deploy_ecs_service(
     container_name = "app"
     app_data_mount = "/mnt/app-data"
 
-    cf_signing = get_or_create_cloudfront_signing_material(rotate=False)
     environment = [
         {
             "name": "APP_CONFIG_JSON",
@@ -6289,10 +6333,6 @@ def deploy_ecs_service(
             "name": "CLOUDFRONT_KEY_PAIR_ID",
             "value": cf_signing.get("public_key_id") or "",
         },
-        {
-            "name": "CLOUDFRONT_SIGNING_PRIVATE_KEY",
-            "value": cf_signing.get("private_key_pem") or "",
-        },
     ]
     container_definition: Dict[str, object] = {
         "name": container_name,
@@ -6300,6 +6340,15 @@ def deploy_ecs_service(
         "essential": True,
         "portMappings": [{"containerPort": 8501, "protocol": "tcp"}],
         "environment": environment,
+        "secrets": [
+            {
+                "name": "CLOUDFRONT_SIGNING_PRIVATE_KEY",
+                "valueFrom": _ecs_secret_value_from(
+                    CLOUDFRONT_SIGNING_KEY_SECRET_NAME,
+                    json_key="private_key_pem",
+                ),
+            },
+        ],
         "logConfiguration": {
             "logDriver": "awslogs",
             "options": {
