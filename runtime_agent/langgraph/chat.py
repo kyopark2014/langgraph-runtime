@@ -80,10 +80,14 @@ model_type = models[0]["model_type"]
 debug_mode = "Enable"
 user_id = "agent"
 guardrail_enabled = True
+memory_enabled = False
+memory_id = None
+actor_id = None
+session_id = None
 
-def update(userId, modelName, debugMode, guardrailEnabled=None):    
+def update(userId, modelName, debugMode, guardrailEnabled=None, memoryEnabled=None):    
     global model_name, model_id, model_type, debug_mode, reasoning_mode
-    global models, user_id, guardrail_enabled
+    global models, user_id, guardrail_enabled, memory_enabled
 
     if userId != user_id:
         user_id = userId
@@ -104,6 +108,10 @@ def update(userId, modelName, debugMode, guardrailEnabled=None):
     if guardrailEnabled is not None and guardrail_enabled != guardrailEnabled:
         guardrail_enabled = guardrailEnabled
         logger.info(f"guardrail_enabled: {guardrail_enabled}")
+
+    if memoryEnabled is not None and memory_enabled != memoryEnabled:
+        memory_enabled = memoryEnabled
+        logger.info(f"memory_enabled: {memory_enabled}")
 
 def _guardrail_config() -> dict | None:
     if not guardrail_enabled:
@@ -1666,6 +1674,15 @@ async def create_agent(
 
     server_params = langgraph_agent.load_multiple_mcp_server_parameters(mcp_json)
 
+    # Pass current user_id to memory MCP via process env
+    for server_name in ("memory",):
+        params = server_params.get(server_name)
+        if params and params.get("transport") == "stdio":
+            env = dict(params.get("env") or {})
+            env["AGENTCORE_USER_ID"] = user_id
+            params["env"] = env
+            logger.info(f"{server_name} MCP AGENTCORE_USER_ID={user_id}")
+
     has_agentcore = any(
         cfg.get("auth_type") == "aws_sigv4"
         for cfg in (mcp_json.get("mcpServers") or {}).values()
@@ -1860,3 +1877,58 @@ async def run_langgraph_agent(query: str, mcp_servers: list, skill_list: list):
         result += _format_artifact_links_markdown(artifacts)
 
     return result, artifacts
+
+
+#########################################################
+# AgentCore Memory
+#########################################################
+import agentcore_memory
+
+
+def initiate_memory():
+    """Load or create AgentCore Memory session variables for the current user."""
+    global memory_id, actor_id, session_id
+
+    effective_user_id = user_id if user_id and str(user_id).strip() else "default"
+    logger.info(f"initiate_memory for user_id: {effective_user_id}")
+
+    memory_id, actor_id, session_id, namespace = agentcore_memory.load_memory_variables(
+        effective_user_id
+    )
+    if not namespace:
+        namespace = f"/users/{actor_id}/preferences"
+    logger.info(
+        f"memory_id: {memory_id}, actor_id: {actor_id}, "
+        f"session_id: {session_id}, namespace: {namespace}"
+    )
+
+    if memory_id is None:
+        memory_id = agentcore_memory.retrieve_memory_id()
+        if memory_id is None:
+            logger.info("Memory will be created...")
+            memory_id = agentcore_memory.create_memory()
+            logger.info(f"Memory was created... {memory_id}")
+
+    agentcore_memory.create_strategy_if_not_exists(memory_id)
+
+
+def save_to_memory(query, result):
+    """Save conversation to AgentCore Memory when memory_enabled is True."""
+    global memory_id, actor_id, session_id
+
+    if not memory_enabled:
+        return
+
+    try:
+        expected_actor = agentcore_memory.resolve_memory_actor_id(
+            user_id if user_id and str(user_id).strip() else "default"
+        )
+        if memory_id is None or actor_id != expected_actor:
+            initiate_memory()
+
+        agentcore_memory.save_conversation_to_memory(
+            memory_id, actor_id, session_id, query, result
+        )
+        logger.info(f"Saved conversation to AgentCore Memory for actor_id={actor_id}")
+    except Exception as e:
+        logger.error(f"Failed to save conversation to AgentCore Memory: {e}")

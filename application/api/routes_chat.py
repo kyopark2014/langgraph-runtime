@@ -238,6 +238,7 @@ def _run_agent_thread(
     model_name: str,
     skill_list: list[str],
     guardrail_enabled: bool,
+    memory_enabled: bool,
     runtime_session_id: str,
     files: list[str],
     message_queue: queue.Queue,
@@ -256,6 +257,7 @@ def _run_agent_thread(
             notification_queue=sink,
             skill_list=skill_list,
             guardrail_enabled=guardrail_enabled,
+            memory_enabled=memory_enabled,
             files=files,
         )
         if not isinstance(response, str):
@@ -298,6 +300,7 @@ def chat_stream(task_id: str, body: ChatRequest, request: Request):
             "model_name": task["model_name"],
             "skill_list": task["skills"],
             "guardrail_enabled": task["guardrail_enabled"],
+            "memory_enabled": task["memory_enabled"],
             "runtime_session_id": task["runtime_session_id"],
             "files": files,
             "message_queue": message_queue,

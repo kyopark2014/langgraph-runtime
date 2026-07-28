@@ -56,6 +56,8 @@ def _merge_application_config(config: dict) -> dict:
         "s3_files_file_system_id",
         "agent_runtime_vpc_subnets",
         "agent_runtime_security_groups",
+        "memory_id",
+        "agentcore_memory_role",
     ):
         app_value = app_config.get(key)
         if app_value and updated.get(key) != app_value:
@@ -217,6 +219,8 @@ def update_knowledge_base_config() -> bool:
                 "s3_files_file_system_id",
                 "agent_runtime_vpc_subnets",
                 "agent_runtime_security_groups",
+                "agentcore_memory_role",
+                "memory_id",
             ):
                 if app_config.get(key):
                     updates[key] = app_config[key]
@@ -285,6 +289,8 @@ def update_knowledge_base_config() -> bool:
             "s3_files_file_system_id",
             "agent_runtime_vpc_subnets",
             "agent_runtime_security_groups",
+            "agentcore_memory_role",
+            "memory_id",
         ):
             if app_config.get(key) and not updates.get(key):
                 updates[key] = app_config[key]

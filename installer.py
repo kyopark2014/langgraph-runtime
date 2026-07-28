@@ -24,6 +24,11 @@ from botocore.exceptions import ClientError, NoCredentialsError, ParamValidation
 import urllib.request
 import urllib.error
 
+try:
+    from bedrock_agentcore.memory import MemoryClient
+except ImportError:
+    MemoryClient = None  # type: ignore
+
 # Configuration
 project_name = "langgraph-runtime" # at least 3 characters
 region = "us-west-2"
@@ -4003,22 +4008,35 @@ def create_agentcore_memory_role() -> str:
     """Create AgentCore Memory IAM role."""
     logger.info("[2/10] Creating AgentCore Memory IAM role")
     role_name = f"role-agentcore-memory-for-{project_name}-{region}"
-    
+
+    # Trust must include aws:SourceAccount / aws:SourceArn; CreateMemory rejects otherwise.
+    # https://docs.aws.amazon.com/bedrock-agentcore/latest/devguide/long-term-configuring-custom-strategies.html
     assume_role_policy = {
         "Version": "2012-10-17",
         "Statement": [
             {
+                "Sid": "MemoryAssumeRolePolicy",
                 "Effect": "Allow",
                 "Principal": {
                     "Service": "bedrock-agentcore.amazonaws.com"
                 },
-                "Action": "sts:AssumeRole"
+                "Action": "sts:AssumeRole",
+                "Condition": {
+                    "StringEquals": {
+                        "aws:SourceAccount": account_id
+                    },
+                    "ArnLike": {
+                        "aws:SourceArn": (
+                            f"arn:aws:bedrock-agentcore:{region}:{account_id}:*"
+                        )
+                    },
+                },
             }
-        ]
+        ],
     }
-    
+
     role_arn = create_iam_role(role_name, assume_role_policy)
-    
+
     memory_policy = {
         "Version": "2012-10-17",
         "Statement": [
@@ -4027,27 +4045,168 @@ def create_agentcore_memory_role() -> str:
                 "Action": [
                     "bedrock:InvokeModel",
                     "bedrock:InvokeModelWithResponseStream",
-                    "bedrock:ListMemories",
-                    "bedrock:CreateMemory",
-                    "bedrock:DeleteMemory",
-                    "bedrock:DescribeMemory",
-                    "bedrock:UpdateMemory",
-                    "bedrock:ListMemoryRecords",
-                    "bedrock:CreateMemoryRecord",
-                    "bedrock:DeleteMemoryRecord",
-                    "bedrock:DescribeMemoryRecord",
-                    "bedrock:UpdateMemoryRecord"
                 ],
                 "Resource": [
                     "arn:aws:bedrock:*::foundation-model/*",
-                    "arn:aws:bedrock:*:*:inference-profile/*"
-                ]
+                    "arn:aws:bedrock:*:*:inference-profile/*",
+                ],
+                "Condition": {
+                    "StringEquals": {
+                        "aws:ResourceAccount": account_id
+                    }
+                },
             }
-        ]
+        ],
     }
     attach_inline_policy(role_name, f"agentcore-memory-policy-for-{project_name}", memory_policy)
-    
+
+    # IAM eventual consistency: CreateMemory validates trust immediately after role create/update
+    logger.info("  Waiting for IAM role trust policy to propagate...")
+    time.sleep(10)
+
     return role_arn
+
+
+USER_PREFERENCE_PROMPT = (
+    "You are tasked with analyzing conversations to extract the user's preferences. You'll be analyzing two sets of data:\n"
+    "<past_conversation>\n"
+    "[Past conversations between the user and system will be placed here for context]\n"
+    "</past_conversation>\n"
+    "<current_conversation>\n"
+    "[The current conversation between the user and system will be placed here]\n"
+    "</current_conversation>\n"
+    "Your job is to identify and categorize the user's preferences into two main types:\n"
+    "- Explicit preferences: Directly stated preferences by the user.\n"
+    "- Implicit preferences: Inferred from patterns, repeated inquiries, or contextual clues. Take a close look at user's request for implicit preferences.\n"
+    "For explicit preference, extract only preference that the user has explicitly shared. Do not infer user's preference.\n"
+    "For implicit preference, it is allowed to infer user's preference, but only the ones with strong signals, such as requesting something multiple times.\n"
+    "Use Korean.\n"
+)
+
+SUMMARY_PROMPT = (
+    "You will be given a text block and a list of summaries you previously generated when available.\n"
+    "<task>\n"
+    "- When the previously generated is not available, your goal is to summarize the given text block.\n"
+    "- When there is existing summary, your goal is to extend summary by taking into account the given text block.\n"
+    "- If there are queries/topics specified in the text block, your generated summary need to cover those queries/topics.\n"
+    "- If there are instructions in the text block **guiding you how to generate summary**, you MUST follow them.\n"
+    "</task>\n"
+    "Use Korean.\n"
+)
+
+SEMANTIC_PROMPT = (
+    "You are a long-term memory extraction agent supporting a lifelong learning system.\n"
+    "Your task is to identify and extract meaningful information about the users from a given list of messages.\n"
+    "Analyze the conversation and extract structured information about the user according to the schema below.\n"
+    "Only include details that are explicitly stated or can be logically inferred from the conversation.\n"
+    "- Extract information ONLY from the user messages. You should use assistant messages only as supporting context.\n"
+    "- If the conversation contains no relevant or noteworthy information, return an empty list.\n"
+    "- Do NOT extract anything from prior conversation history, even if provided. Use it solely for context.\n"
+    "- Do NOT incorporate external knowledge.\n"
+    "- Avoid duplicate extractions.\n"
+    "Use Korean.\n"
+)
+
+SEMANTIC_CONSOLIDATION_PROMPT = (
+    "You consolidate newly extracted facts with existing long-term semantic memories.\n"
+    "- Merge duplicates; keep the most specific and recent facts.\n"
+    "- Do not invent facts that were not extracted.\n"
+    "- Prefer clear, atomic statements in Korean.\n"
+    "Use Korean.\n"
+)
+
+MEMORY_EXTRACTION_MODEL_ID = "us.anthropic.claude-haiku-4-5-20251001-v1:0"
+
+
+def _shared_memory_strategies() -> list:
+    """UserPreference + Summary + Semantic (one of each kind per memory_id)."""
+    return [
+        {
+            "customMemoryStrategy": {
+                "name": "UserPreference",
+                "namespaces": ["/users/{actorId}/preferences"],
+                "configuration": {
+                    "userPreferenceOverride": {
+                        "extraction": {
+                            "modelId": MEMORY_EXTRACTION_MODEL_ID,
+                            "appendToPrompt": USER_PREFERENCE_PROMPT,
+                        }
+                    }
+                },
+            }
+        },
+        {
+            "customMemoryStrategy": {
+                "name": "Summary",
+                "namespaces": ["/users/{actorId}/sessions/{sessionId}"],
+                "configuration": {
+                    "summaryOverride": {
+                        "consolidation": {
+                            "modelId": MEMORY_EXTRACTION_MODEL_ID,
+                            "appendToPrompt": SUMMARY_PROMPT,
+                        }
+                    }
+                },
+            }
+        },
+        {
+            "customMemoryStrategy": {
+                "name": "Semantic",
+                "namespaces": ["/users/{actorId}/facts"],
+                "configuration": {
+                    "semanticOverride": {
+                        "extraction": {
+                            "modelId": MEMORY_EXTRACTION_MODEL_ID,
+                            "appendToPrompt": SEMANTIC_PROMPT,
+                        },
+                        "consolidation": {
+                            "modelId": MEMORY_EXTRACTION_MODEL_ID,
+                            "appendToPrompt": SEMANTIC_CONSOLIDATION_PROMPT,
+                        },
+                    }
+                },
+            }
+        },
+    ]
+
+
+def create_agentcore_memory(role_arn: str, user_id: str = "installer") -> str:
+    """
+    Create AgentCore Memory with shared UserPreference / Summary / Semantic strategies.
+
+    user_id is unused for strategy naming — kept for call-site compatibility.
+    User isolation uses {actorId}/{sessionId} namespace templates from CreateEvent.
+    """
+    logger.info("[2/10] Creating AgentCore Memory")
+
+    if MemoryClient is None:
+        raise ImportError(
+            "bedrock-agentcore is required to create AgentCore Memory. "
+            "Install with: pip install bedrock-agentcore"
+        )
+
+    memory_client = MemoryClient(region_name=region)
+    memory_name = project_name.replace("-", "_")
+
+    memories = memory_client.list_memories()
+    for memory in memories:
+        if memory.get("id", "").split("-")[0] == memory_name:
+            memory_id = memory.get("id")
+            logger.info(f"  Memory already exists: {memory_id}")
+            return memory_id
+
+    strategies = _shared_memory_strategies()
+    result = memory_client.create_memory_and_wait(
+        name=memory_name,
+        description=f"Memory for {project_name}",
+        event_expiry_days=365,
+        strategies=strategies,
+        memory_execution_role_arn=role_arn,
+    )
+    memory_id = result.get("id")
+    names = [s["customMemoryStrategy"]["name"] for s in strategies]
+    logger.info(f"  ✓ Memory created: {memory_id} (strategies={names})")
+    return memory_id
 
 
 def _agentcore_websearch_tool_arn() -> str:
@@ -5123,6 +5282,8 @@ def build_app_environment(
     knowledge_base_id: str,
     data_source_id: Optional[str] = None,
     agentcore_websearch_gateway_info: Optional[Dict[str, str]] = None,
+    agentcore_memory_role_arn: str = "",
+    memory_id: str = "",
 ) -> Dict[str, str]:
     """Build application config used by the container at runtime."""
     app_config = {
@@ -5142,6 +5303,10 @@ def build_app_environment(
         "s3_arn": f"arn:aws:s3:::{s3_bucket_name}",
         "sharing_url": f"https://{cloudfront_domain}",
     }
+    if agentcore_memory_role_arn:
+        app_config["agentcore_memory_role"] = agentcore_memory_role_arn
+    if memory_id:
+        app_config["memory_id"] = memory_id
     _apply_websearch_gateway_config(app_config, agentcore_websearch_gateway_info)
     return _merge_runtime_agent_settings(app_config)
 
@@ -5252,6 +5417,8 @@ def build_config_from_deployment_state(
     s3_bucket_name: Optional[str] = None,
     cloudfront_info: Optional[Dict[str, str]] = None,
     s3_files_info: Optional[Dict[str, object]] = None,
+    agentcore_memory_role_arn: Optional[str] = None,
+    memory_id: Optional[str] = None,
 ) -> Dict[str, str]:
     """Build config.json payload from whatever deployment resources are available."""
     config_data: Dict[str, str] = {
@@ -5280,6 +5447,10 @@ def build_config_from_deployment_state(
         config_data["s3_arn"] = f"arn:aws:s3:::{s3_bucket_name}"
     if cloudfront_info:
         config_data["sharing_url"] = f"https://{cloudfront_info.get('domain', '')}"
+    if agentcore_memory_role_arn:
+        config_data["agentcore_memory_role"] = agentcore_memory_role_arn
+    if memory_id:
+        config_data["memory_id"] = memory_id
     config_data = apply_s3_files_config(config_data, s3_files_info)
     return _merge_runtime_agent_settings(config_data)
 
@@ -7869,6 +8040,8 @@ def main():
     ecs_info = None
     app_environment = None
     agentcore_websearch_gateway_info = None
+    agentcore_memory_role_arn = None
+    memory_id = None
     s3_files_info = None
     deployment_success = False
     
@@ -7880,6 +8053,8 @@ def main():
         # 2. Create IAM roles
         knowledge_base_role_arn = create_knowledge_base_role()
         ecs_roles = create_ecs_roles()
+        agentcore_memory_role_arn = create_agentcore_memory_role()
+        memory_id = create_agentcore_memory(agentcore_memory_role_arn)
         agentcore_websearch_gateway_info = _find_existing_agentcore_websearch_gateway()
         if agentcore_websearch_gateway_info:
             logger.info(
@@ -7955,6 +8130,8 @@ def main():
             knowledge_base_id,
             data_source_id,
             agentcore_websearch_gateway_info,
+            agentcore_memory_role_arn,
+            memory_id,
         )
         app_environment = apply_s3_files_config(app_environment, s3_files_info)
         if write_application_config(app_environment):
@@ -8031,6 +8208,10 @@ def main():
         logger.info(f"  OpenSearch Collection ARN: {opensearch_info['arn']}")
         logger.info(f"  Knowledge Base ID: {knowledge_base_id}")
         logger.info(f"  Knowledge Base Role: {knowledge_base_role_arn}")
+        if agentcore_memory_role_arn:
+            logger.info(f"  AgentCore Memory Role: {agentcore_memory_role_arn}")
+        if memory_id:
+            logger.info(f"  AgentCore Memory ID: {memory_id}")
         if agentcore_websearch_gateway_info:
             logger.info(
                 f"  AgentCore Web Search Gateway: "
@@ -8092,6 +8273,8 @@ def main():
                 s3_bucket_name=s3_bucket_name,
                 cloudfront_info=cloudfront_info,
                 s3_files_info=s3_files_info,
+                agentcore_memory_role_arn=agentcore_memory_role_arn,
+                memory_id=memory_id,
             )
 
         if opensearch_info:
