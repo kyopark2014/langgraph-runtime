@@ -5,6 +5,7 @@ This script creates AWS infrastructure resources equivalent to the CDK stack.
 """
 
 import boto3
+import getpass
 import json
 import time
 import logging
@@ -61,6 +62,8 @@ distance_metric = "cosine"
 custom_header_name = "X-Custom-Header"
 # Origin header secret value lives in Secrets Manager (never hardcode in source).
 ALB_ORIGIN_HEADER_SECRET_NAME = f"{project_name}/cloudfront-alb-origin-header"
+# HMAC key for Web UI session cookies (never hardcode in source).
+SESSION_SIGNING_KEY_SECRET_NAME = f"{project_name}/session-signing-key"
 CLOUDFRONT_SIGNING_KEY_SECRET_NAME = f"{project_name}/cloudfront-signing-key"
 CLOUDFRONT_S3_SIGNED_PATHS = ("/images/*", "/docs/*", "/artifacts/*")
 
@@ -163,8 +166,11 @@ agentcore_control_client = boto3.client(
     region_name=AGENTCORE_GATEWAY_REGION,
 )
 s3files_client = boto3.client("s3files", region_name=region)
+cognito_idp_client = boto3.client("cognito-idp", region_name=region)
 
 S3_FILES_SESSION_PREFIX = "agentcore-sessions/"
+COGNITO_ADMIN_USERNAME = "admin"
+COGNITO_CLIENT_NAME = f"{project_name}-web-ui"
 
 bucket_name = f"storage-for-{project_name}-{account_id}-{region}"
 
@@ -266,6 +272,61 @@ def get_or_create_alb_origin_header(*, rotate: bool = False) -> str:
         raise
 
 
+def get_or_create_session_signing_key(*, rotate: bool = False) -> str:
+    """
+    Ensure HMAC key for Web UI session cookies exists in Secrets Manager.
+
+    ECS injects the value via task-definition ``secrets`` (ARN), never as
+    plaintext ``environment``. Callers should not put the return value into
+    the task definition.
+    """
+    secret_name = SESSION_SIGNING_KEY_SECRET_NAME
+
+    try:
+        existing = secretsmanager_client.get_secret_value(SecretId=secret_name)
+        current = (existing.get("SecretString") or "").strip()
+        if current and not rotate:
+            logger.info(f"  ✓ Reusing session signing key from Secrets Manager: {secret_name}")
+            return current
+        new_value = secrets.token_urlsafe(32)
+        secretsmanager_client.put_secret_value(
+            SecretId=secret_name,
+            SecretString=new_value,
+        )
+        logger.info(f"  ✓ Rotated session signing key in Secrets Manager: {secret_name}")
+        return new_value
+    except ClientError as e:
+        if e.response["Error"]["Code"] != "ResourceNotFoundException":
+            raise
+
+    new_value = secrets.token_urlsafe(32)
+    try:
+        secretsmanager_client.create_secret(
+            Name=secret_name,
+            Description=f"HMAC signing key for {project_name} Web UI session cookies",
+            SecretString=new_value,
+            Tags=[
+                {"Key": "Name", "Value": secret_name},
+                {"Key": "Project", "Value": project_name},
+            ],
+        )
+        logger.info(f"  ✓ Created session signing key secret: {secret_name}")
+        return new_value
+    except ClientError as e:
+        if e.response["Error"]["Code"] == "ResourceExistsException":
+            if rotate:
+                new_value = secrets.token_urlsafe(32)
+                secretsmanager_client.put_secret_value(
+                    SecretId=secret_name,
+                    SecretString=new_value,
+                )
+                logger.info(f"  ✓ Rotated session signing key in Secrets Manager: {secret_name}")
+                return new_value
+            response = secretsmanager_client.get_secret_value(SecretId=secret_name)
+            return response["SecretString"]
+        raise
+
+
 def _describe_secret_arn(secret_id: str) -> str:
     """Return the full Secrets Manager ARN (includes random suffix)."""
     return secretsmanager_client.describe_secret(SecretId=secret_id)["ARN"]
@@ -289,6 +350,7 @@ def _ecs_execution_secrets_policy_document() -> Dict:
                 "Effect": "Allow",
                 "Action": ["secretsmanager:GetSecretValue"],
                 "Resource": [
+                    f"arn:aws:secretsmanager:{region}:{account_id}:secret:{project_name}/session-signing-key*",
                     f"arn:aws:secretsmanager:{region}:{account_id}:secret:{project_name}/cloudfront-signing-key*",
                 ],
             }
@@ -957,6 +1019,26 @@ def _get_ecs_task_inline_policies() -> List[Dict]:
                 ],
             },
         },
+        {
+            "name": f"ecs-task-cognito-policy-for-{project_name}",
+            "document": {
+                "Version": "2012-10-17",
+                "Statement": [
+                    {
+                        "Sid": "CognitoUserPasswordAuth",
+                        "Effect": "Allow",
+                        "Action": [
+                            "cognito-idp:InitiateAuth",
+                            "cognito-idp:RespondToAuthChallenge",
+                            "cognito-idp:GetUser",
+                            "cognito-idp:DescribeUserPool",
+                            "cognito-idp:DescribeUserPoolClient",
+                        ],
+                        "Resource": ["*"],
+                    },
+                ],
+            },
+        },
     ]
 
 
@@ -1005,6 +1087,180 @@ def create_ecs_roles() -> Dict[str, str]:
         "execution_role_arn": execution_role_arn,
     }
 
+
+# ---------------------------------------------------------------------------
+# Cognito User Pool helpers
+# ---------------------------------------------------------------------------
+
+def _find_cognito_user_pool_id(pool_name: str) -> Optional[str]:
+    """Return User Pool ID if a pool with the given name already exists."""
+    next_token = None
+    while True:
+        kwargs: Dict = {"MaxResults": 60}
+        if next_token:
+            kwargs["NextToken"] = next_token
+        response = cognito_idp_client.list_user_pools(**kwargs)
+        for pool in response.get("UserPools", []):
+            if pool.get("Name") == pool_name:
+                return pool["Id"]
+        next_token = response.get("NextToken")
+        if not next_token:
+            return None
+
+
+def _find_cognito_client_id(user_pool_id: str, client_name: str) -> Optional[str]:
+    """Return App Client ID if a client with the given name already exists."""
+    next_token = None
+    while True:
+        kwargs: Dict = {"UserPoolId": user_pool_id, "MaxResults": 60}
+        if next_token:
+            kwargs["NextToken"] = next_token
+        response = cognito_idp_client.list_user_pool_clients(**kwargs)
+        for client in response.get("UserPoolClients", []):
+            if client.get("ClientName") == client_name:
+                return client["ClientId"]
+        next_token = response.get("NextToken")
+        if not next_token:
+            return None
+
+
+def _cognito_password_valid(password: str) -> Optional[str]:
+    """Return an error message if password does not meet Cognito policy, else None."""
+    if len(password) < 8:
+        return "Password must be at least 8 characters"
+    if not any(c.isupper() for c in password):
+        return "Password must include at least one uppercase letter"
+    if not any(c.islower() for c in password):
+        return "Password must include at least one lowercase letter"
+    if not any(c.isdigit() for c in password):
+        return "Password must include at least one number"
+    return None
+
+
+def prompt_cognito_admin_password() -> str:
+    """Prompt interactively for the Cognito admin password (confirmed twice)."""
+    logger.info("")
+    logger.info("Cognito admin user registration")
+    logger.info(f"  Username: {COGNITO_ADMIN_USERNAME}")
+    logger.info(
+        "  Password policy: min 8 chars, uppercase, lowercase, number "
+        "(symbols optional)"
+    )
+    while True:
+        password = getpass.getpass(
+            f"Enter password for Cognito admin '{COGNITO_ADMIN_USERNAME}': "
+        )
+        error = _cognito_password_valid(password)
+        if error:
+            logger.warning(f"  {error}. Try again.")
+            continue
+        confirm = getpass.getpass("Confirm password: ")
+        if password != confirm:
+            logger.warning("  Passwords do not match. Try again.")
+            continue
+        return password
+
+
+def _cognito_admin_exists(user_pool_id: str, username: str) -> bool:
+    try:
+        cognito_idp_client.admin_get_user(UserPoolId=user_pool_id, Username=username)
+        return True
+    except ClientError as e:
+        if e.response["Error"]["Code"] == "UserNotFoundException":
+            return False
+        raise
+
+
+def _create_cognito_admin_user(user_pool_id: str, username: str, password: str) -> None:
+    cognito_idp_client.admin_create_user(
+        UserPoolId=user_pool_id,
+        Username=username,
+        TemporaryPassword=password,
+        MessageAction="SUPPRESS",
+    )
+    cognito_idp_client.admin_set_user_password(
+        UserPoolId=user_pool_id,
+        Username=username,
+        Password=password,
+        Permanent=True,
+    )
+
+
+def create_cognito_user_pool() -> Dict[str, str]:
+    """Create Cognito User Pool (named project_name), app client, and admin user.
+
+    Admin password is prompted via getpass when the admin user does not yet exist.
+    """
+    logger.info("Creating Cognito User Pool for Web UI authentication")
+    pool_name = project_name
+    user_pool_id = _find_cognito_user_pool_id(pool_name)
+
+    if user_pool_id:
+        logger.info(f"  ✓ Reusing Cognito User Pool: {user_pool_id} (name={pool_name})")
+    else:
+        response = cognito_idp_client.create_user_pool(
+            PoolName=pool_name,
+            Policies={
+                "PasswordPolicy": {
+                    "MinimumLength": 8,
+                    "RequireUppercase": True,
+                    "RequireLowercase": True,
+                    "RequireNumbers": True,
+                    "RequireSymbols": False,
+                }
+            },
+            MfaConfiguration="OFF",
+            AdminCreateUserConfig={"AllowAdminCreateUserOnly": True},
+            Schema=[
+                {
+                    "Name": "email",
+                    "AttributeDataType": "String",
+                    "Mutable": True,
+                    "Required": False,
+                }
+            ],
+        )
+        user_pool_id = response["UserPool"]["Id"]
+        logger.info(f"  ✓ Cognito User Pool created: {user_pool_id} (name={pool_name})")
+
+    client_id = _find_cognito_client_id(user_pool_id, COGNITO_CLIENT_NAME)
+    if client_id:
+        logger.info(f"  ✓ Reusing Cognito App Client: {client_id}")
+    else:
+        client_response = cognito_idp_client.create_user_pool_client(
+            UserPoolId=user_pool_id,
+            ClientName=COGNITO_CLIENT_NAME,
+            GenerateSecret=False,
+            ExplicitAuthFlows=[
+                "ALLOW_USER_PASSWORD_AUTH",
+                "ALLOW_REFRESH_TOKEN_AUTH",
+                "ALLOW_USER_SRP_AUTH",
+            ],
+            PreventUserExistenceErrors="ENABLED",
+        )
+        client_id = client_response["UserPoolClient"]["ClientId"]
+        logger.info(f"  ✓ Cognito App Client created: {client_id}")
+
+    if _cognito_admin_exists(user_pool_id, COGNITO_ADMIN_USERNAME):
+        logger.info(
+            f"  ✓ Cognito admin user already exists: {COGNITO_ADMIN_USERNAME}"
+        )
+    else:
+        password = prompt_cognito_admin_password()
+        _create_cognito_admin_user(user_pool_id, COGNITO_ADMIN_USERNAME, password)
+        logger.info(f"  ✓ Cognito admin user created: {COGNITO_ADMIN_USERNAME}")
+
+    cognito_info = {
+        "cognito_user_pool_id": user_pool_id,
+        "cognito_user_pool_name": pool_name,
+        "cognito_client_id": client_id,
+        "cognito_client_name": COGNITO_CLIENT_NAME,
+        "cognito_admin_username": COGNITO_ADMIN_USERNAME,
+        "cognito_region": region,
+    }
+    if write_application_config(cognito_info):
+        logger.info("  ✓ Saved Cognito settings to application/config.json")
+    return cognito_info
 
 
 def _get_installer_iam_arn() -> str:
@@ -5283,6 +5539,7 @@ def build_app_environment(
     knowledge_base_id: str,
     data_source_id: Optional[str] = None,
     agentcore_websearch_gateway_info: Optional[Dict[str, str]] = None,
+    cognito_info: Optional[Dict[str, str]] = None,
     agentcore_memory_role_arn: str = "",
     memory_id: str = "",
 ) -> Dict[str, str]:
@@ -5304,6 +5561,15 @@ def build_app_environment(
         "s3_arn": f"arn:aws:s3:::{s3_bucket_name}",
         "sharing_url": f"https://{cloudfront_domain}",
     }
+    if cognito_info:
+        app_config.update({
+            "cognito_user_pool_id": cognito_info.get("cognito_user_pool_id", ""),
+            "cognito_user_pool_name": cognito_info.get("cognito_user_pool_name", ""),
+            "cognito_client_id": cognito_info.get("cognito_client_id", ""),
+            "cognito_client_name": cognito_info.get("cognito_client_name", ""),
+            "cognito_admin_username": cognito_info.get("cognito_admin_username", ""),
+            "cognito_region": cognito_info.get("cognito_region", region),
+        })
     if agentcore_memory_role_arn:
         app_config["agentcore_memory_role"] = agentcore_memory_role_arn
     if memory_id:
@@ -5418,6 +5684,7 @@ def build_config_from_deployment_state(
     s3_bucket_name: Optional[str] = None,
     cloudfront_info: Optional[Dict[str, str]] = None,
     s3_files_info: Optional[Dict[str, object]] = None,
+    cognito_info: Optional[Dict[str, str]] = None,
     agentcore_memory_role_arn: Optional[str] = None,
     memory_id: Optional[str] = None,
 ) -> Dict[str, str]:
@@ -5448,6 +5715,15 @@ def build_config_from_deployment_state(
         config_data["s3_arn"] = f"arn:aws:s3:::{s3_bucket_name}"
     if cloudfront_info:
         config_data["sharing_url"] = f"https://{cloudfront_info.get('domain', '')}"
+    if cognito_info:
+        config_data.update({
+            "cognito_user_pool_id": cognito_info.get("cognito_user_pool_id", ""),
+            "cognito_user_pool_name": cognito_info.get("cognito_user_pool_name", ""),
+            "cognito_client_id": cognito_info.get("cognito_client_id", ""),
+            "cognito_client_name": cognito_info.get("cognito_client_name", ""),
+            "cognito_admin_username": cognito_info.get("cognito_admin_username", ""),
+            "cognito_region": cognito_info.get("cognito_region", region),
+        })
     if agentcore_memory_role_arn:
         config_data["agentcore_memory_role"] = agentcore_memory_role_arn
     if memory_id:
@@ -6475,6 +6751,7 @@ def deploy_ecs_service(
 
     execution_role_name = f"role-ecs-execution-for-{project_name}-{region}"
     attach_ecs_execution_secrets_policy(execution_role_name)
+    get_or_create_session_signing_key(rotate=False)
     cf_signing = get_or_create_cloudfront_signing_material(rotate=False)
 
     ensure_ecs_service_linked_role()
@@ -6513,6 +6790,10 @@ def deploy_ecs_service(
         "portMappings": [{"containerPort": 8501, "protocol": "tcp"}],
         "environment": environment,
         "secrets": [
+            {
+                "name": "SESSION_SIGNING_KEY",
+                "valueFrom": _ecs_secret_value_from(SESSION_SIGNING_KEY_SECRET_NAME),
+            },
             {
                 "name": "CLOUDFRONT_SIGNING_PRIVATE_KEY",
                 "valueFrom": _ecs_secret_value_from(
@@ -8041,6 +8322,7 @@ def main():
     ecs_info = None
     app_environment = None
     agentcore_websearch_gateway_info = None
+    cognito_info = None
     agentcore_memory_role_arn = None
     memory_id = None
     s3_files_info = None
@@ -8080,6 +8362,10 @@ def main():
                 agentcore_websearch_gateway_role_arn
             )
         logger.info(f"IAM roles created...")
+
+        # 2.5. Cognito User Pool + admin (Web UI id/password auth)
+        cognito_info = create_cognito_user_pool()
+        logger.info("Cognito User Pool created...")
         
         # 3. Create OpenSearch Serverless collection
         opensearch_info = create_opensearch_collection(
@@ -8131,8 +8417,9 @@ def main():
             knowledge_base_id,
             data_source_id,
             agentcore_websearch_gateway_info,
-            agentcore_memory_role_arn,
-            memory_id,
+            cognito_info=cognito_info,
+            agentcore_memory_role_arn=agentcore_memory_role_arn,
+            memory_id=memory_id,
         )
         app_environment = apply_s3_files_config(app_environment, s3_files_info)
         if write_application_config(app_environment):
@@ -8209,6 +8496,10 @@ def main():
         logger.info(f"  OpenSearch Collection ARN: {opensearch_info['arn']}")
         logger.info(f"  Knowledge Base ID: {knowledge_base_id}")
         logger.info(f"  Knowledge Base Role: {knowledge_base_role_arn}")
+        if cognito_info:
+            logger.info(f"  Cognito User Pool: {cognito_info.get('cognito_user_pool_id')} ({cognito_info.get('cognito_user_pool_name')})")
+            logger.info(f"  Cognito Client ID: {cognito_info.get('cognito_client_id')}")
+            logger.info(f"  Cognito Admin: {cognito_info.get('cognito_admin_username')}")
         if agentcore_memory_role_arn:
             logger.info(f"  AgentCore Memory Role: {agentcore_memory_role_arn}")
         if memory_id:
@@ -8246,6 +8537,7 @@ def main():
         logger.info("")
         logger.info("Note: CloudFront distribution and ECS service may take 15-20 minutes to fully deploy")
         logger.info("      Once deployed, you can access your application at the URL above")
+        logger.info(f"      Login with Cognito username '{COGNITO_ADMIN_USERNAME}' and the password set during install")
         logger.info("="*60)
         logger.info("")
         
@@ -8274,6 +8566,7 @@ def main():
                 s3_bucket_name=s3_bucket_name,
                 cloudfront_info=cloudfront_info,
                 s3_files_info=s3_files_info,
+                cognito_info=cognito_info,
                 agentcore_memory_role_arn=agentcore_memory_role_arn,
                 memory_id=memory_id,
             )

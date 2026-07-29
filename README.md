@@ -1785,7 +1785,7 @@ installer가 만드는 **런타임 역할** 요약:
 
 | 역할 | 축소 요지 |
 |------|-----------|
-| ECS Task Role (`role-ecs-task-for-…`) | Bedrock Invoke/Mantle/KB ingest, AgentCore `InvokeAgentRuntime`을 **프로젝트·runtime_agent 이름 후보 + config ARN**으로 한정 (`_ecs_agent_runtime_resource_arns`), 프로젝트 S3 버킷만 |
+| ECS Task Role (`role-ecs-task-for-…`) | Bedrock Invoke/Mantle/KB ingest, AgentCore `InvokeAgentRuntime`을 **프로젝트·runtime_agent 이름 후보 + config ARN**으로 한정 (`_ecs_agent_runtime_resource_arns`), 프로젝트 S3 버킷만, Cognito `InitiateAuth`/`GetUser` 포함 |
 | Knowledge Base Role | `bedrock:InvokeModel`(+inference profile), 프로젝트 S3 Get/List, `aoss:APIAccessAll`을 `collection/*`로 한정 |
 | AgentCore Runtime Role (`AmazonBedrockAgentCoreRuntimePolicyFor…`) | Trust: `bedrock-agentcore` + `SourceAccount`/`SourceArn`(프로젝트 runtime). 권한: 프로젝트 runtime ARN, Tavily secret만, 프로젝트 S3, Gateway/workload-identity, VPC ENI·ECR·로그 |
 | Websearch Gateway Role | `SourceAccount`/`SourceArn` 조건 유지 |

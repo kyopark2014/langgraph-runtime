@@ -45,6 +45,7 @@ export default function App() {
   const [userId, setUserId] = useState<string | null>(null);
   const [authReady, setAuthReady] = useState(false);
   const [bootError, setBootError] = useState<string | null>(null);
+  const [loginLoading, setLoginLoading] = useState(false);
   const [config, setConfig] = useState<AppConfig | null>(null);
   const [tasks, setTasks] = useState<Task[]>([]);
   const [activeTaskId, setActiveTaskId] = useState<string | null>(null);
@@ -170,13 +171,25 @@ export default function App() {
     return () => window.removeEventListener("resize", onResize);
   }, []);
 
-  async function handleLogin(id: string) {
+  async function handleLogin(username: string, password: string) {
     setBootError(null);
+    setLoginLoading(true);
     try {
-      await api.setSession(id);
-      setUserId(id.trim());
+      const session = await api.login(username, password);
+      setUserId(session.user_id.trim());
     } catch (err) {
-      setBootError(err instanceof Error ? err.message : String(err));
+      let message = err instanceof Error ? err.message : String(err);
+      try {
+        const parsed = JSON.parse(message) as { detail?: string };
+        if (typeof parsed.detail === "string" && parsed.detail) {
+          message = parsed.detail;
+        }
+      } catch {
+        // keep raw message
+      }
+      setBootError(message);
+    } finally {
+      setLoginLoading(false);
     }
   }
 
@@ -339,6 +352,7 @@ export default function App() {
         onSubmit={handleLogin}
         error={bootError}
         projectName={config?.projectName}
+        loading={loginLoading}
       />
     );
   }

@@ -1,12 +1,18 @@
 import logging
 from urllib.parse import urlparse
 
+import boto3
+from botocore.exceptions import ClientError
 from fastapi import APIRouter, HTTPException, Request, Response
 from pydantic import BaseModel, Field
 
 try:
+    from application import utils
+    from application import session_cookie
     from application import cloudfront_cookies
 except ImportError:
+    import utils
+    import session_cookie
     import cloudfront_cookies
 
 logger = logging.getLogger("routes_auth")
@@ -14,15 +20,6 @@ logger = logging.getLogger("routes_auth")
 router = APIRouter(prefix="/api/session", tags=["session"])
 
 SESSION_COOKIE = "agent_user_id"
-SESSION_MAX_AGE = 60 * 60 * 24 * 30
-
-
-class SessionRequest(BaseModel):
-    user_id: str = Field(min_length=1, max_length=128)
-
-
-class SessionResponse(BaseModel):
-    user_id: str
 
 
 def _cookie_secure(request: Request) -> bool:
@@ -41,11 +38,6 @@ def _cookie_secure(request: Request) -> bool:
     if host.endswith(".cloudfront.net"):
         return True
     try:
-        try:
-            from application import utils
-        except ImportError:
-            import utils
-
         sharing = (utils.load_config().get("sharing_url") or "").strip()
         parsed = urlparse(sharing)
         if parsed.scheme == "https" and (parsed.hostname or "").lower() == host:
@@ -55,42 +47,135 @@ def _cookie_secure(request: Request) -> bool:
     return False
 
 
-def _set_user_cookie(response: Response, request: Request, user_id: str) -> None:
+class LoginRequest(BaseModel):
+    username: str = Field(min_length=1, max_length=128)
+    password: str = Field(min_length=1, max_length=256)
+
+
+class SessionResponse(BaseModel):
+    user_id: str
+
+
+def _cognito_settings() -> tuple[str, str, str]:
+    config = utils.load_config()
+    user_pool_id = (config.get("cognito_user_pool_id") or "").strip()
+    client_id = (config.get("cognito_client_id") or "").strip()
+    cognito_region = (config.get("cognito_region") or config.get("region") or "us-west-2").strip()
+    if not user_pool_id or not client_id:
+        raise HTTPException(
+            status_code=503,
+            detail="Cognito is not configured. Run installer.py to create the User Pool.",
+        )
+    return user_pool_id, client_id, cognito_region
+
+
+def _authenticate_with_cognito(username: str, password: str) -> str:
+    """Authenticate with Cognito and return the verified Username.
+
+    Uses AccessToken → GetUser so the session is bound to a Cognito-confirmed
+    identity, not the raw login form string.
+    """
+    _user_pool_id, client_id, cognito_region = _cognito_settings()
+    client = boto3.client("cognito-idp", region_name=cognito_region)
+    try:
+        response = client.initiate_auth(
+            ClientId=client_id,
+            AuthFlow="USER_PASSWORD_AUTH",
+            AuthParameters={
+                "USERNAME": username,
+                "PASSWORD": password,
+            },
+        )
+    except ClientError as e:
+        code = e.response.get("Error", {}).get("Code", "")
+        message = e.response.get("Error", {}).get("Message", str(e))
+        logger.warning("Cognito auth failed for %s: %s (%s)", username, code, message)
+        if code in (
+            "NotAuthorizedException",
+            "UserNotFoundException",
+            "UserNotConfirmedException",
+            "PasswordResetRequiredException",
+        ):
+            raise HTTPException(status_code=401, detail="Invalid username or password") from e
+        if code == "InvalidParameterException":
+            raise HTTPException(status_code=400, detail=message) from e
+        raise HTTPException(status_code=502, detail=f"Cognito error: {code}") from e
+
+    challenge = response.get("ChallengeName")
+    if challenge:
+        raise HTTPException(
+            status_code=403,
+            detail=f"Additional authentication required: {challenge}",
+        )
+    auth_result = response.get("AuthenticationResult") or {}
+    access_token = (auth_result.get("AccessToken") or "").strip()
+    if not access_token:
+        raise HTTPException(status_code=401, detail="Authentication failed")
+
+    try:
+        user = client.get_user(AccessToken=access_token)
+    except ClientError as e:
+        code = e.response.get("Error", {}).get("Code", "")
+        logger.warning("Cognito GetUser failed after login: %s", code)
+        raise HTTPException(status_code=401, detail="Authentication failed") from e
+
+    verified = (user.get("Username") or "").strip()
+    if not verified:
+        raise HTTPException(status_code=401, detail="Authentication failed")
+    return verified
+
+
+def _set_session_cookie(response: Response, request: Request, user_id: str) -> None:
+    token = session_cookie.sign_session(user_id)
     secure = _cookie_secure(request)
+    max_age = session_cookie.session_max_age_seconds()
     response.set_cookie(
         key=SESSION_COOKIE,
-        value=user_id,
+        value=token,
         httponly=True,
         samesite="lax",
         secure=secure,
-        max_age=SESSION_MAX_AGE,
+        max_age=max_age,
     )
     if not cloudfront_cookies.set_signed_cookies(
-        response, secure=secure, max_age=SESSION_MAX_AGE
+        response, secure=secure, max_age=max_age
     ):
         logger.warning(
             "CloudFront signed cookies not attached on login (signing material missing?)"
         )
 
 
-@router.post("", response_model=SessionResponse)
-def set_session(body: SessionRequest, request: Request, response: Response) -> SessionResponse:
-    user_id = body.user_id.strip()
-    if not user_id:
-        raise HTTPException(status_code=400, detail="user_id is required")
-    _set_user_cookie(response, request, user_id)
+def get_optional_user_id(request: Request) -> str | None:
+    """Return verified user_id from the HMAC session cookie, or None."""
+    return session_cookie.verify_session(request.cookies.get(SESSION_COOKIE) or "")
+
+
+@router.post("/login", response_model=SessionResponse)
+def login(body: LoginRequest, request: Request, response: Response) -> SessionResponse:
+    username = body.username.strip()
+    password = body.password
+    if not username or not password:
+        raise HTTPException(status_code=400, detail="username and password are required")
+    user_id = _authenticate_with_cognito(username, password)
+    _set_session_cookie(response, request, user_id)
     return SessionResponse(user_id=user_id)
+
+
+@router.post("", response_model=SessionResponse, deprecated=True)
+def set_session(body: LoginRequest, request: Request, response: Response) -> SessionResponse:
+    """Backward-compatible alias: requires Cognito username/password."""
+    return login(body, request, response)
 
 
 @router.get("", response_model=SessionResponse | None)
 def get_session(request: Request, response: Response) -> SessionResponse | None:
-    user_id = (request.cookies.get(SESSION_COOKIE) or "").strip()
+    user_id = get_optional_user_id(request)
     if not user_id:
         return None
     if not cloudfront_cookies.set_signed_cookies(
         response,
         secure=_cookie_secure(request),
-        max_age=SESSION_MAX_AGE,
+        max_age=session_cookie.session_max_age_seconds(),
     ):
         logger.warning(
             "CloudFront signed cookies not attached on session refresh "
@@ -107,7 +192,7 @@ def clear_session(request: Request, response: Response) -> None:
 
 
 def require_user_id(request: Request) -> str:
-    user_id = request.cookies.get(SESSION_COOKIE)
+    user_id = get_optional_user_id(request)
     if not user_id:
         raise HTTPException(status_code=401, detail="User session required")
     return user_id
