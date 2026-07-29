@@ -1753,6 +1753,22 @@ SG만으로는 공격자가 **자체 CloudFront**를 ALB DNS에 연결해 우회
 삭제 시 `uninstaller.py`의 `delete_alb_origin_header_secret()`이 해당 시크릿을 제거합니다.
 
 
+### Cognito 사용자 인증 (Web UI 로그인)
+
+Web UI 로그인은 **Amazon Cognito USER_PASSWORD_AUTH**를 사용합니다. installer가 Cognito User Pool, App Client, admin 사용자를 자동 생성하고, 세션은 **HMAC-signed 쿠키**(`session_cookie.py`)로 유지됩니다.
+
+| 항목 | 내용 |
+|------|------|
+| User Pool | `installer.py` → `create_cognito_user_pool()` |
+| App Client | `{project_name}-web-ui`, `USER_PASSWORD_AUTH` / `SRP_AUTH` / `REFRESH_TOKEN` |
+| 세션 쿠키 | `SESSION_SIGNING_KEY` (Secrets Manager HMAC key) → `v1.<payload>.<sig>` |
+| ECS 주입 | task-definition `secrets` (ARN), 평문 environment 아님 |
+| 사용자 추가 | `python add_user.py --username <user> --password <pw>` |
+| 삭제 | `uninstaller.delete_cognito_user_pool()` + `delete_session_signing_key_secret()` |
+
+비밀번호 정책: 최소 8자, 대문자·소문자·숫자 포함 (기호는 선택). Self-signup은 비활성화되어 있으므로 추가 사용자는 `add_user.py`로 등록합니다.
+
+
 ### CloudFront Signed Cookies (S3 `/artifacts` · `/docs` · `/images`)
 
 `sharing_url`로 내려주는 파일 링크는 같은 CloudFront 도메인의 S3 오리진 path입니다. 이 path를 인터넷에 공개하지 않기 위해 **CloudFront Signed Cookies**를 사용합니다.
