@@ -53,21 +53,13 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
 
 export const api = {
   getSession: () => request<{ user_id: string } | null>("/api/session"),
-  setSession: (user_id: string) =>
-    request<{ user_id: string }>("/api/session", {
+  login: (username: string, password: string) =>
+    request<{ user_id: string }>("/api/session/login", {
       method: "POST",
-      body: JSON.stringify({ user_id }),
+      body: JSON.stringify({ username, password }),
     }),
   clearSession: () => request<void>("/api/session", { method: "DELETE" }),
   getConfig: () => request<AppConfig>("/api/config"),
-  patchDefaults: (body: {
-    default_skills?: string[];
-    default_mcp_servers?: string[];
-  }) =>
-    request<{ ok: boolean }>("/api/config/defaults", {
-      method: "PATCH",
-      body: JSON.stringify(body),
-    }),
   listTasks: () => request<{ tasks: Task[] }>("/api/tasks"),
   createTask: (body: Partial<Task>) =>
     request<Task>("/api/tasks", {

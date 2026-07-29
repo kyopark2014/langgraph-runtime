@@ -2,7 +2,6 @@ import logging
 import os
 
 from fastapi import APIRouter
-from pydantic import BaseModel
 
 try:
     from application import utils
@@ -52,11 +51,6 @@ def load_capability_list(filename: str) -> list[str]:
         return []
 
 
-class DefaultsPatch(BaseModel):
-    default_skills: list[str] | None = None
-    default_mcp_servers: list[str] | None = None
-
-
 @router.get("")
 def get_config():
     skill_options = load_capability_list("skills.list")
@@ -78,12 +72,3 @@ def get_config():
         "default_skills": default_skills,
         "default_mcp_servers": default_mcp,
     }
-
-
-@router.patch("/defaults")
-def patch_defaults(body: DefaultsPatch):
-    utils.save_favorite_tools(
-        skills=body.default_skills,
-        mcp_servers=body.default_mcp_servers,
-    )
-    return {"ok": True}

@@ -410,14 +410,14 @@ Web UI는 **FastAPI 백엔드 + React SPA**로 구성됩니다. Streamlit을 대
 | **프론트엔드** | Vite 6 | 개발 서버·프로덕션 빌드 |
 | **프론트엔드** | react-markdown, remark-gfm | Assistant 응답 Markdown 렌더링 |
 | **프론트엔드** | CSS (`agent.css`) | 다크 테마 Agent 레이아웃 |
-| **인증** | HttpOnly Cookie (`agent_user_id`) | User ID 세션 유지 |
+| **인증** | Amazon Cognito USER_PASSWORD_AUTH + HMAC-signed HttpOnly Cookie | username/password 로그인, 세션 쿠키 서명 검증 |
 
 ### 화면 구조
 
 ```text
 ┌─────────────────────────────────────────────────────────────┐
 │ UserIdModal (최초 진입 · 쿠키 없음)                          │
-│   User ID 입력 → /api/session POST                           │
+│   Cognito username/password → /api/session/login POST        │
 └─────────────────────────────────────────────────────────────┘
                               │
                               ▼
@@ -440,7 +440,7 @@ Web UI는 **FastAPI 백엔드 + React SPA**로 구성됩니다. Streamlit을 대
 
 | 영역 | 컴포넌트 | 설명 |
 |------|----------|------|
-| 인증 | `UserIdModal` | User ID 입력 후 쿠키 세션 생성 |
+| 인증 | `UserIdModal` | Cognito username/password 입력 후 HMAC 서명 쿠키 세션 생성 |
 | 사이드바 | `Sidebar`, `TaskListItem` | 태스크 목록, New task, 핀·이름 변경·삭제 |
 | 설정 | `ConfigDrawer` | Skill·MCP 체크박스 선택 (태스크별) |
 | 채팅 | `ChatThread`, `MessageBubble`, `ChatInput` | 대화 스레드, Markdown·도구 이벤트, 입력 |
@@ -512,9 +512,9 @@ function MarkdownText({ content }: { content: string }) {
 | Method | Path | 설명 |
 |--------|------|------|
 | `GET` | `/api/health` | 헬스체크 |
-| `GET`/`POST` | `/api/session` | User ID 세션 조회·생성 (Cookie) |
+| `GET` | `/api/session` | 세션 조회 (HMAC 서명 Cookie 검증) |
+| `POST` | `/api/session/login` | Cognito username/password 로그인 → 세션 생성 |
 | `GET` | `/api/config` | Skill·MCP·Model 목록 및 기본값 |
-| `PATCH` | `/api/config/defaults` | 기본 Skill·MCP 저장 |
 | `GET`/`POST` | `/api/tasks` | 태스크 목록·생성 (`runtime_session_id` 발급) |
 | `GET`/`PATCH`/`DELETE` | `/api/tasks/{id}` | 태스크 조회·수정·삭제 |
 | `GET` | `/api/tasks/{id}/messages` | 태스크 메시지 목록 |
@@ -1779,7 +1779,7 @@ SG만으로는 공격자가 **자체 CloudFront**를 ALB DNS에 연결해 우회
 2. **최소 Action** — `bedrock:*`, `s3:*`, `ec2:*` 같은 서비스 와일드카드를 쓰지 않고, Invoke·Retrieve·Get/Put 등 필요한 Action만 허용합니다.
 3. **Resource 스코프** — `Resource: "*"` 대신 프로젝트 S3 버킷, Knowledge Base, Runtime/Gateway ARN, AOSS `collection/*`, Tavily secret 등 **이 배포의 리소스**로 한정합니다.
 4. **조건·Trust 축소** — Gateway·**AgentCore Runtime**은 `SourceAccount`/`SourceArn`, S3 Files는 Access Point ARN condition, ECS Task trust는 `ecs-tasks.amazonaws.com`만 허용합니다. AgentCore Runtime trust는 **account root를 포함하지 않습니다**.
-5. **죽은 권한 제거** — 미사용 역할(`create_agent_role`)과 CE/Lambda/Cognito 등 코드에서 쓰지 않는 정책을 제거합니다.
+5. **죽은 권한 제거** — 미사용 역할(`create_agent_role`)과 CE/Lambda 등 코드에서 쓰지 않는 정책을 제거합니다. Cognito `cognito-idp:InitiateAuth`/`GetUser` 등은 ECS Task Role에 포함됩니다.
 
 installer가 만드는 **런타임 역할** 요약:
 
