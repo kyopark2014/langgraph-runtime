@@ -5,7 +5,6 @@ This script creates AWS infrastructure resources equivalent to the CDK stack.
 """
 
 import boto3
-import getpass
 import json
 import time
 import logging
@@ -1138,7 +1137,16 @@ def _cognito_password_valid(password: str) -> Optional[str]:
 
 
 def prompt_cognito_admin_password() -> str:
-    """Prompt interactively for the Cognito admin password (confirmed twice)."""
+    """Prompt the operator to type the Cognito admin password (confirmed twice).
+
+    Password is read with input() so the user enters it directly in the terminal.
+    Non-interactive runs are rejected — do not pass a default/hardcoded password.
+    """
+    if not sys.stdin.isatty():
+        raise RuntimeError(
+            "Cognito admin password must be entered interactively. "
+            "Run `python installer.py` in a terminal and type the password when prompted."
+        )
     logger.info("")
     logger.info("Cognito admin user registration")
     logger.info(f"  Username: {COGNITO_ADMIN_USERNAME}")
@@ -1147,14 +1155,14 @@ def prompt_cognito_admin_password() -> str:
         "(symbols optional)"
     )
     while True:
-        password = getpass.getpass(
+        password = input(
             f"Enter password for Cognito admin '{COGNITO_ADMIN_USERNAME}': "
-        )
+        ).strip()
         error = _cognito_password_valid(password)
         if error:
             logger.warning(f"  {error}. Try again.")
             continue
-        confirm = getpass.getpass("Confirm password: ")
+        confirm = input("Confirm password: ").strip()
         if password != confirm:
             logger.warning("  Passwords do not match. Try again.")
             continue
@@ -1186,10 +1194,13 @@ def _create_cognito_admin_user(user_pool_id: str, username: str, password: str) 
     )
 
 
-def create_cognito_user_pool() -> Dict[str, str]:
+def create_cognito_user_pool(
+    admin_password: Optional[str] = None,
+) -> Dict[str, str]:
     """Create Cognito User Pool (named project_name), app client, and admin user.
 
-    Admin password is prompted via getpass when the admin user does not yet exist.
+    When the admin user does not yet exist, ``admin_password`` must be provided
+    (prompted interactively at install start) — never auto-generated.
     """
     logger.info("Creating Cognito User Pool for Web UI authentication")
     pool_name = project_name
@@ -1246,7 +1257,7 @@ def create_cognito_user_pool() -> Dict[str, str]:
             f"  ✓ Cognito admin user already exists: {COGNITO_ADMIN_USERNAME}"
         )
     else:
-        password = prompt_cognito_admin_password()
+        password = admin_password or prompt_cognito_admin_password()
         _create_cognito_admin_user(user_pool_id, COGNITO_ADMIN_USERNAME, password)
         logger.info(f"  ✓ Cognito admin user created: {COGNITO_ADMIN_USERNAME}")
 
@@ -1764,14 +1775,22 @@ def wait_for_nat_gateway(nat_gateway_id: str, log_interval: int = 6) -> None:
     wait_count = 0
     while True:
         response = ec2_client.describe_nat_gateways(NatGatewayIds=[nat_gateway_id])
-        state = response["NatGateways"][0]["State"]
+        nat_gw = response["NatGateways"][0]
+        state = nat_gw["State"]
         wait_count += 1
         if wait_count % log_interval == 0:
-            logger.debug(f"  NAT Gateway status: {state} (waited {wait_count * 10} seconds)")
+            logger.info(f"  NAT Gateway status: {state} (waited {wait_count * 10} seconds)")
         if state == "available":
             break
+        if state in ("failed", "deleted", "deleting"):
+            failure_code = nat_gw.get("FailureCode") or "unknown"
+            failure_message = nat_gw.get("FailureMessage") or "no details"
+            raise RuntimeError(
+                f"NAT Gateway {nat_gateway_id} entered state '{state}': "
+                f"{failure_code} — {failure_message}"
+            )
         time.sleep(10)
-    logger.debug(f"NAT Gateway is available: {nat_gateway_id}")
+    logger.info(f"  ✓ NAT Gateway is available: {nat_gateway_id}")
 
 
 def get_or_create_nat_gateway(vpc_id: str, public_subnet_id: str) -> str:
@@ -8308,6 +8327,17 @@ def main():
     logger.info(f"Account ID: {account_id}")
     logger.info(f"Bucket Name: {bucket_name}")
     logger.info("="*60)
+
+    # Ask for Cognito admin password up front (interactive only; never auto-set).
+    existing_cognito_pool_id = _find_cognito_user_pool_id(project_name)
+    need_cognito_admin_password = (
+        not existing_cognito_pool_id
+        or not _cognito_admin_exists(existing_cognito_pool_id, COGNITO_ADMIN_USERNAME)
+    )
+    cognito_admin_password: Optional[str] = None
+    if need_cognito_admin_password:
+        cognito_admin_password = prompt_cognito_admin_password()
+        logger.info("  ✓ Cognito admin password accepted (will create admin user later)")
     
     start_time = time.time()
 
@@ -8364,7 +8394,7 @@ def main():
         logger.info(f"IAM roles created...")
 
         # 2.5. Cognito User Pool + admin (Web UI id/password auth)
-        cognito_info = create_cognito_user_pool()
+        cognito_info = create_cognito_user_pool(admin_password=cognito_admin_password)
         logger.info("Cognito User Pool created...")
         
         # 3. Create OpenSearch Serverless collection
