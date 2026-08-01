@@ -524,6 +524,8 @@ function MarkdownText({ content }: { content: string }) {
 
 보안 응답 헤더(HSTS·CSP·`X-Frame-Options`·`nosniff`·`Referrer-Policy`)는 앱 미들웨어([application/security_headers.py](./application/security_headers.py))와 CloudFront Managed-SecurityHeadersPolicy(installer)로 적용합니다.
 
+ALB stickiness는 `lb_cookie`(AWSALB/AWSALBCORS) 대신 **`app_cookie`=`agent_user_id`** 를 사용합니다. AWSALB* 쿠키는 Secure/HttpOnly를 설정할 수 없습니다.
+
 채팅 요청은 `agentcore_client.run_agent` → AgentCore Runtime으로 전달되며, 태스크마다 고유한 `runtime_session_id`로 checkpoint가 격리됩니다.
 
 ### Local 빌드
