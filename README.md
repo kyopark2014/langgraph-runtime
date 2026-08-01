@@ -522,7 +522,7 @@ function MarkdownText({ content }: { content: string }) {
 
 `/docs`, `/redoc`, `/openapi.json`은 기본 비활성입니다(운영 ECS). 로컬에서만 `ENABLE_API_DOCS=1`([run_local.sh](./run_local.sh) 기본값)로 Swagger를 켤 수 있습니다.
 
-보안 응답 헤더(HSTS·CSP·`X-Frame-Options`·`nosniff`·`Referrer-Policy`)는 앱 미들웨어([application/security_headers.py](./application/security_headers.py))와 CloudFront Managed-SecurityHeadersPolicy(installer)로 적용합니다.
+보안 응답 헤더(HSTS·CSP·`X-Frame-Options`·`nosniff`·`Referrer-Policy`)는 앱 미들웨어([application/security_headers.py](./application/security_headers.py))와 CloudFront custom ResponseHeadersPolicy(installer; origin `Server`/`X-Powered-By` 제거)로 적용합니다. Web UI uvicorn은 `--no-server-header`로 기동합니다.
 
 ALB stickiness는 `lb_cookie`(AWSALB/AWSALBCORS) 대신 **`app_cookie`=`agent_user_id`** 를 사용합니다. AWSALB* 쿠키는 Secure/HttpOnly를 설정할 수 없습니다.
 

@@ -610,7 +610,7 @@ RUN chmod +x /app/docker-entrypoint.sh
 EXPOSE 8501
 HEALTHCHECK CMD curl --fail http://localhost:8501/api/health
 ENTRYPOINT ["/app/docker-entrypoint.sh"]
-CMD ["uvicorn", "application.server:app", "--host", "0.0.0.0", "--port", "8501"]
+CMD ["uvicorn", "application.server:app", "--host", "0.0.0.0", "--port", "8501", "--no-server-header"]
 ```
 
 `docker-entrypoint.sh`는 `APP_CONFIG_JSON` 환경변수가 있으면 `/app/application/config.json`을 생성한 뒤 uvicorn을 실행합니다.
