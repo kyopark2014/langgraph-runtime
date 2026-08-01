@@ -22,6 +22,9 @@ logger = logging.getLogger("session_cookie")
 
 COOKIE_VERSION = "v1"
 DEFAULT_MAX_AGE_SECONDS = 60 * 60 * 24 * 30  # 30 days
+# 32 bytes = 256 bits of entropy for the HMAC signing key, matching the
+# SHA-256 output size used to sign cookies (see _sign()).
+SIGNING_KEY_BYTES = 32
 _ENV_KEY = "SESSION_SIGNING_KEY"
 _LOCAL_KEY_FILE = Path(__file__).resolve().parent / "data" / ".session_signing_key"
 
@@ -62,7 +65,7 @@ def _project_name() -> str:
             return name
     except Exception:
         pass
-    return (os.environ.get("TASK_DB_PROJECT") or "gsolution").strip() or "gsolution"
+    return (os.environ.get("TASK_DB_PROJECT") or "langgraph-runtime").strip() or "langgraph-runtime"
 
 
 def _secret_name() -> str:
@@ -84,18 +87,35 @@ def _load_key_from_secrets_manager() -> Optional[bytes]:
         if secret:
             return secret.encode("utf-8")
     except Exception as e:
-        logger.debug("Session signing key not loaded from Secrets Manager: %s", e)
+        # Logs only the exception, never the key material.
+        logger.debug("Session signing key not loaded from Secrets Manager: %s", e)  # nosemgrep: python.lang.security.audit.logging.python-logger-credential-disclosure
     return None
 
 
 def _load_or_create_local_key() -> bytes:
     _LOCAL_KEY_FILE.parent.mkdir(parents=True, exist_ok=True)
     if _LOCAL_KEY_FILE.exists():
-        existing = _LOCAL_KEY_FILE.read_text(encoding="utf-8").strip()
+        try:
+            existing = _LOCAL_KEY_FILE.read_text(encoding="utf-8").strip()
+        except (OSError, UnicodeDecodeError) as e:
+            logger.warning(
+                "Failed to read local session signing key at %s: %s",
+                _LOCAL_KEY_FILE,
+                e,
+            )
+            existing = ""
         if existing:
             return existing.encode("utf-8")
-    value = secrets.token_urlsafe(32)
-    _LOCAL_KEY_FILE.write_text(value + "\n", encoding="utf-8")
+    value = secrets.token_urlsafe(SIGNING_KEY_BYTES)
+    try:
+        _LOCAL_KEY_FILE.write_text(value + "\n", encoding="utf-8")
+    except OSError as e:
+        logger.warning(
+            "Failed to persist local session signing key at %s: %s",
+            _LOCAL_KEY_FILE,
+            e,
+        )
+        return value.encode("utf-8")
     try:
         os.chmod(_LOCAL_KEY_FILE, 0o600)
     except OSError:

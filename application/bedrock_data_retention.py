@@ -1,6 +1,7 @@
 import json
 import logging
 import os
+import time
 import urllib.error
 import urllib.request
 
@@ -13,11 +14,42 @@ logger = logging.getLogger(__name__)
 OPTED_IN_REGIONS: set[str] = set()
 FABLE_RETENTION_ENSURED = False
 BEDROCK_DATA_RETENTION_URL = "https://bedrock.{region}.amazonaws.com/data-retention"
+# bedrock-mantle is the Amazon Bedrock OpenAI-compatible endpoint (not a separate AWS
+# service): https://docs.aws.amazon.com/bedrock/latest/userguide/bedrock-mantle.html
 MANTLE_DATA_RETENTION_URL = "https://bedrock-mantle.{region}.api.aws/v1/data_retention"
 OPT_IN_MODE = "provider_data_share"
 DEFAULT_REGION = "us-east-1"
 FABLE_BEDROCK_REGIONS = ("us-west-2", "us-east-1", "us-east-2")
 CONFIG_KEY = "fable_data_retention_opt_in"
+HTTP_MAX_ATTEMPTS = 3
+HTTP_RETRY_BACKOFF_SECONDS = 1.0
+HTTP_TIMEOUT_SECONDS = 30
+
+
+def _urlopen_with_retry(
+    request: urllib.request.Request, timeout: int = HTTP_TIMEOUT_SECONDS
+):
+    """Open an HTTP request with simple retries for transient failures."""
+    # Reject non-HTTPS schemes (e.g. file:/ftp:) before opening the URL.
+    if request.type != "https":
+        raise ValueError(f"Refusing to open non-HTTPS URL scheme: {request.type}")
+    last_error: Exception | None = None
+    for attempt in range(1, HTTP_MAX_ATTEMPTS + 1):
+        try:
+            return urllib.request.urlopen(request, timeout=timeout)  # nosec B310 — scheme validated above
+        except urllib.error.HTTPError as error:
+            # Retry only transient server / rate-limit responses.
+            if error.code not in (429, 500, 502, 503, 504) or attempt >= HTTP_MAX_ATTEMPTS:
+                raise
+            last_error = error
+            time.sleep(HTTP_RETRY_BACKOFF_SECONDS * attempt)
+        except (urllib.error.URLError, TimeoutError, OSError) as error:
+            last_error = error
+            if attempt >= HTTP_MAX_ATTEMPTS:
+                raise
+            time.sleep(HTTP_RETRY_BACKOFF_SECONDS * attempt)
+    assert last_error is not None
+    raise last_error
 
 
 def _get_account_id() -> str:
@@ -98,7 +130,7 @@ def _request_bedrock_control_plane(
         method=method,
         headers=dict(prepared.headers),
     )
-    with urllib.request.urlopen(http_request, timeout=30) as response:
+    with _urlopen_with_retry(http_request, timeout=HTTP_TIMEOUT_SECONDS) as response:
         return response.status, response.read().decode()
 
 
@@ -115,52 +147,112 @@ def _request_mantle(method: str, region: str, body: dict | None = None) -> tuple
             "Content-Type": "application/json",
         },
     )
-    with urllib.request.urlopen(request, timeout=30) as response:
+    with _urlopen_with_retry(request, timeout=HTTP_TIMEOUT_SECONDS) as response:
         return response.status, response.read().decode()
 
 
 def get_data_retention_mode(region: str = DEFAULT_REGION) -> tuple[bool, str]:
     try:
         status, body = _request_bedrock_control_plane("GET", region)
-        return True, f"HTTP {status}: {body}"
+        logger.info(
+            "data retention mode GET ok region=%s status=%s body=%s",
+            region,
+            status,
+            body,
+        )
+        return True, f"HTTP {status}"
     except urllib.error.HTTPError as error:
-        return False, f"HTTP {error.code}: {error.read().decode()}"
+        body = error.read().decode(errors="replace")
+        logger.error(
+            "Failed to retrieve data retention mode region=%s HTTP %s: %s",
+            region,
+            error.code,
+            body,
+            exc_info=True,
+        )
+        return False, "Failed to retrieve data retention mode"
     except Exception as error:
-        return False, str(error)
+        logger.error(
+            "Failed to retrieve data retention mode region=%s (%s)",
+            region,
+            type(error).__name__,
+            exc_info=True,
+        )
+        return False, "Failed to retrieve data retention mode"
 
 
 def opt_in_provider_data_share(region: str = DEFAULT_REGION) -> tuple[bool, str]:
     if region in OPTED_IN_REGIONS:
         return True, ""
 
+    control_plane_detail = ""
     try:
         status, body = _request_bedrock_control_plane(
             "PUT", region, {"mode": OPT_IN_MODE}
         )
         OPTED_IN_REGIONS.add(region)
-        return True, f"bedrock control plane ({region}) HTTP {status}: {body or OPT_IN_MODE}"
+        logger.info(
+            "bedrock control plane opt-in ok region=%s status=%s body=%s",
+            region,
+            status,
+            body or OPT_IN_MODE,
+        )
+        return True, f"bedrock control plane ({region}) HTTP {status}"
     except urllib.error.HTTPError as control_plane_error:
-        control_plane_message = control_plane_error.read().decode()
+        control_plane_detail = (
+            f"HTTP {control_plane_error.code}: "
+            f"{control_plane_error.read().decode(errors='replace')}"
+        )
+        logger.warning(
+            "bedrock control plane opt-in failed region=%s: %s",
+            region,
+            control_plane_detail,
+        )
     except Exception as control_plane_error:
-        control_plane_message = str(control_plane_error)
+        control_plane_detail = (
+            f"{type(control_plane_error).__name__}: {control_plane_error}"
+        )
+        logger.warning(
+            "bedrock control plane opt-in failed region=%s: %s",
+            region,
+            control_plane_detail,
+            exc_info=True,
+        )
 
     try:
         status, body = _request_mantle("PUT", region, {"mode": OPT_IN_MODE})
         OPTED_IN_REGIONS.add(region)
-        return True, f"bedrock-mantle ({region}) HTTP {status}: {body or OPT_IN_MODE}"
+        logger.info(
+            "bedrock-mantle opt-in ok region=%s status=%s body=%s",
+            region,
+            status,
+            body or OPT_IN_MODE,
+        )
+        return True, f"bedrock-mantle ({region}) HTTP {status}"
     except urllib.error.HTTPError as mantle_error:
-        mantle_message = mantle_error.read().decode()
-        return False, (
-            f"Failed to opt in for {region}. "
-            f"bedrock control plane: {control_plane_message}; "
-            f"bedrock-mantle: HTTP {mantle_error.code}: {mantle_message}"
+        mantle_detail = (
+            f"HTTP {mantle_error.code}: "
+            f"{mantle_error.read().decode(errors='replace')}"
         )
+        logger.error(
+            "Failed to opt in for provider data share region=%s "
+            "control_plane=%s mantle=%s",
+            region,
+            control_plane_detail,
+            mantle_detail,
+            exc_info=True,
+        )
+        return False, f"Failed to opt in for provider data share in {region}"
     except Exception as mantle_error:
-        return False, (
-            f"Failed to opt in for {region}. "
-            f"bedrock control plane: {control_plane_message}; "
-            f"bedrock-mantle: {mantle_error}"
+        logger.error(
+            "Failed to opt in for provider data share region=%s "
+            "control_plane=%s mantle=%s",
+            region,
+            control_plane_detail,
+            f"{type(mantle_error).__name__}: {mantle_error}",
+            exc_info=True,
         )
+        return False, f"Failed to opt in for provider data share in {region}"
 
 
 def ensure_fable_data_retention(

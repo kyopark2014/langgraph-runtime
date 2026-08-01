@@ -146,8 +146,8 @@ def test_login(
             },
         )
     except ClientError as e:
-        code = e.response.get("Error", {}).get("Code", "")
-        message = e.response.get("Error", {}).get("Message", str(e))
+        code = e.response.get("Error", {}).get("Code", "") or type(e).__name__
+        message = e.response.get("Error", {}).get("Message") or "unknown"
         return False, f"InitiateAuth failed: {code} — {message}"
 
     challenge = response.get("ChallengeName")
@@ -162,8 +162,8 @@ def test_login(
     try:
         user = client.get_user(AccessToken=access_token)
     except ClientError as e:
-        code = e.response.get("Error", {}).get("Code", "")
-        message = e.response.get("Error", {}).get("Message", str(e))
+        code = e.response.get("Error", {}).get("Code", "") or type(e).__name__
+        message = e.response.get("Error", {}).get("Message") or "unknown"
         return False, f"GetUser failed: {code} — {message}"
 
     verified = (user.get("Username") or "").strip()
@@ -178,7 +178,7 @@ def test_login(
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Register a Cognito user for langgraph-runtime Web UI login.",
+        description="Register a Cognito user for cde-pilot Web UI login.",
     )
     parser.add_argument(
         "--username",
@@ -257,12 +257,12 @@ def main() -> int:
                 logger.error("  ✗ %s", login_detail)
 
     except ClientError as e:
-        code = e.response.get("Error", {}).get("Code", "")
-        message = e.response.get("Error", {}).get("Message", str(e))
+        code = e.response.get("Error", {}).get("Code", "") or type(e).__name__
+        message = e.response.get("Error", {}).get("Message") or "unknown"
         logger.error("Cognito error: %s — %s", code, message)
         return 1
     except Exception as e:
-        logger.error("Unexpected error: %s", e)
+        logger.error("Unexpected error: %s", type(e).__name__)
         return 1
 
     logger.info("")

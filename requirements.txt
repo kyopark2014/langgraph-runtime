@@ -1,23 +1,23 @@
-bedrock-agentcore
+# CVE pins: bedrock-agentcore>=1.18.1 (CVE-2026-16796),
+# python-multipart>=0.0.31, urllib3>=2.7.0, setuptools>=83.0.0,
+# py>=1.11.0 (CVE-2020-29651), tqdm>=4.66.3 (CVE-2016-10075 / CVE-2024-34062)
+bedrock-agentcore>=1.18.1
 bedrock-agentcore-starter-toolkit
 fastapi
-python-multipart
+python-multipart>=0.0.31
+urllib3>=2.7.0
+setuptools>=83.0.0
+py>=1.11.0
+tqdm>=4.66.3
 uvicorn[standard]
 pandas
 numpy
 boto3>=1.43.32
 langchain_aws
-langchain-openai
-openai>=2.41.0
-aws-bedrock-token-generator
 langchain
-langchain_community
-langgraph
-langchain_experimental
-langgraph-supervisor
-langgraph-swarm
 tavily-python==0.5.0
 yfinance==0.2.52
+finance-datareader
 rizaio==0.8.0
 pytz==2024.2
 beautifulsoup4==4.12.3
@@ -26,7 +26,6 @@ matplotlib==3.10.0
 PyPDF2==3.0.1
 opensearch-py
 mcp
-langchain-mcp-adapters==0.1.9
 wikipedia
 aioboto3
 aiohttp>=3.14.1,<4.0.0
@@ -37,9 +36,20 @@ sarif-om==1.0.4
 arxiv==2.2.0
 chembl-webresource-client==0.10.9
 pytrials==1.0.0
-strands-agents
-strands-agents-tools
+strands-agents[openai]>=1.44.0
+strands-agents-tools>=0.8.1
 reportlab
 nova-act
 sseclient-py
 cryptography
+
+# langgraph-runtime specific
+aws-bedrock-token-generator
+langchain-mcp-adapters==0.1.9
+langchain-openai
+langchain_community
+langchain_experimental
+langgraph
+langgraph-supervisor
+langgraph-swarm
+openai>=2.41.0

@@ -2,6 +2,7 @@ import logging
 from urllib.parse import urlparse
 
 import boto3
+from botocore.config import Config
 from botocore.exceptions import ClientError
 from fastapi import APIRouter, HTTPException, Request, Response
 from pydantic import BaseModel, Field
@@ -16,6 +17,8 @@ except ImportError:
     import cloudfront_cookies
 
 logger = logging.getLogger("routes_auth")
+
+_COGNITO_RETRY_CONFIG = Config(retries={"max_attempts": 5, "mode": "adaptive"})
 
 router = APIRouter(prefix="/api/session", tags=["session"])
 
@@ -76,7 +79,11 @@ def _authenticate_with_cognito(username: str, password: str) -> str:
     identity, not the raw login form string.
     """
     _user_pool_id, client_id, cognito_region = _cognito_settings()
-    client = boto3.client("cognito-idp", region_name=cognito_region)
+    client = boto3.client(
+        "cognito-idp",
+        region_name=cognito_region,
+        config=_COGNITO_RETRY_CONFIG,
+    )
     try:
         response = client.initiate_auth(
             ClientId=client_id,
@@ -87,19 +94,27 @@ def _authenticate_with_cognito(username: str, password: str) -> str:
             },
         )
     except ClientError as e:
-        code = e.response.get("Error", {}).get("Code", "")
-        message = e.response.get("Error", {}).get("Message", str(e))
-        logger.warning("Cognito auth failed for %s: %s (%s)", username, code, message)
+        err = e.response.get("Error", {}) or {}
+        code = err.get("Code", "") or ""
+        cognito_message = err.get("Message", "") or ""
+        logger.warning(
+            "Cognito auth failed for %s: %s (%s)",
+            username,
+            code,
+            cognito_message or type(e).__name__,
+        )
         if code in (
             "NotAuthorizedException",
             "UserNotFoundException",
             "UserNotConfirmedException",
             "PasswordResetRequiredException",
         ):
-            raise HTTPException(status_code=401, detail="Invalid username or password") from e
+            raise HTTPException(status_code=401, detail="Invalid username or password")
         if code == "InvalidParameterException":
-            raise HTTPException(status_code=400, detail=message) from e
-        raise HTTPException(status_code=502, detail=f"Cognito error: {code}") from e
+            raise HTTPException(
+                status_code=400, detail="Invalid authentication parameters"
+            )
+        raise HTTPException(status_code=502, detail="Authentication service error")
 
     challenge = response.get("ChallengeName")
     if challenge:
@@ -117,7 +132,7 @@ def _authenticate_with_cognito(username: str, password: str) -> str:
     except ClientError as e:
         code = e.response.get("Error", {}).get("Code", "")
         logger.warning("Cognito GetUser failed after login: %s", code)
-        raise HTTPException(status_code=401, detail="Authentication failed") from e
+        raise HTTPException(status_code=401, detail="Authentication failed")
 
     verified = (user.get("Username") or "").strip()
     if not verified:

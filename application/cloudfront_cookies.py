@@ -13,6 +13,7 @@ import json
 import logging
 import os
 import time
+from datetime import timedelta
 from typing import Optional
 
 logger = logging.getLogger("cloudfront_cookies")
@@ -21,6 +22,9 @@ COOKIE_POLICY = "CloudFront-Policy"
 COOKIE_SIGNATURE = "CloudFront-Signature"
 COOKIE_KEY_PAIR_ID = "CloudFront-Key-Pair-Id"
 ALL_COOKIE_NAMES = (COOKIE_POLICY, COOKIE_SIGNATURE, COOKIE_KEY_PAIR_ID)
+
+# Fallback when session cookie max-age cannot be resolved (aligned with typical SSO session).
+DEFAULT_COOKIE_MAX_AGE_SECONDS = int(timedelta(days=30).total_seconds())
 
 _ENV_PRIVATE_KEY = "CLOUDFRONT_SIGNING_PRIVATE_KEY"
 _ENV_KEY_PAIR_ID = "CLOUDFRONT_KEY_PAIR_ID"
@@ -83,7 +87,8 @@ def _load_from_secrets_manager() -> tuple[Optional[str], Optional[str]]:
             )
         return raw, (os.environ.get(_ENV_KEY_PAIR_ID) or "").strip() or None
     except Exception as e:
-        logger.debug("CloudFront signing material not loaded from Secrets Manager: %s", e)
+        # Logs only the exception, never the signing material.
+        logger.debug("CloudFront signing material not loaded from Secrets Manager: %s", e)  # nosemgrep: python.lang.security.audit.logging.python-logger-credential-disclosure
         return None, None
 
 
@@ -151,7 +156,7 @@ def build_signed_cookies(*, expire_seconds: Optional[int] = None) -> Optional[di
 
             expire_seconds = session_cookie.session_max_age_seconds()
         except Exception:
-            expire_seconds = 60 * 60 * 24 * 30
+            expire_seconds = DEFAULT_COOKIE_MAX_AGE_SECONDS
 
     expire_at = int(time.time()) + max(60, int(expire_seconds))
     # TrustedKeyGroups is only on S3 path behaviors; Resource may be broad.
@@ -170,7 +175,12 @@ def build_signed_cookies(*, expire_seconds: Optional[int] = None) -> Optional[di
     from cryptography.hazmat.primitives import hashes
     from cryptography.hazmat.primitives.asymmetric import padding
 
-    signature = private_key.sign(policy_json, padding.PKCS1v15(), hashes.SHA1())
+    # CloudFront trusted-signer signatures are fixed to RSA/SHA-1 by AWS; SHA-256
+    # is not accepted by CloudFront. This is protocol-mandated, not a weak choice.
+    # https://docs.aws.amazon.com/AmazonCloudFront/latest/DeveloperGuide/private-content-creating-signed-url-custom-policy.html
+    signature = private_key.sign(  # nosec B303  # nosemgrep: python.cryptography.security.insecure-hash-algorithm-sha1
+        policy_json, padding.PKCS1v15(), hashes.SHA1()  # nosec B303
+    )
 
     return {
         COOKIE_POLICY: _cf_b64(policy_json),
@@ -193,7 +203,7 @@ def set_signed_cookies(response, *, secure: bool, max_age: Optional[int] = None)
 
             max_age = session_cookie.session_max_age_seconds()
         except Exception:
-            max_age = 60 * 60 * 24 * 30
+            max_age = DEFAULT_COOKIE_MAX_AGE_SECONDS
 
     for name, value in cookies.items():
         response.set_cookie(
