@@ -52,7 +52,16 @@ def load_capability_list(filename: str) -> list[str]:
         return []
 
 
+def get_public_config() -> dict[str, Any]:
+    """Minimal fields required before login (login screen branding)."""
+    config = utils.load_config()
+    return {
+        "projectName": config.get("projectName", "agent"),
+    }
+
+
 def get_application_config() -> dict[str, Any]:
+    """Full UI capability catalogs. Call only for authenticated sessions."""
     skill_options = load_capability_list("skills.list")
     mcp_options = load_capability_list("mcp.list")
     default_skills, default_mcp = utils.get_initial_tool_defaults()
@@ -64,7 +73,7 @@ def get_application_config() -> dict[str, Any]:
     if not default_mcp:
         logger.info("No initial MCP defaults matched current capability list")
     return {
-        "projectName": config.get("projectName", "agent"),
+        **get_public_config(),
         "skills": skill_options,
         "mcp_servers": mcp_options,
         "models": MODELS,

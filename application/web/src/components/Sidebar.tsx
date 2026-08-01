@@ -189,7 +189,7 @@ export function Sidebar({
         </div>
       </aside>
 
-      {drawer === "skill" && config && activeTask && (
+      {drawer === "skill" && config?.skills && activeTask && (
         <ConfigDrawer
           title="Skill"
           options={config.skills}
@@ -199,7 +199,7 @@ export function Sidebar({
           onClose={onCloseDrawer}
         />
       )}
-      {drawer === "mcp" && config && activeTask && (
+      {drawer === "mcp" && config?.mcp_servers && activeTask && (
         <ConfigDrawer
           title="MCP"
           options={config.mcp_servers}
@@ -209,7 +209,7 @@ export function Sidebar({
           onClose={onCloseDrawer}
         />
       )}
-      {drawer === "model" && config && activeTask && (
+      {drawer === "model" && config?.models && activeTask && (
         <ConfigDrawer
           title="Model"
           options={config.models}

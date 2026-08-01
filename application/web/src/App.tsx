@@ -18,10 +18,12 @@ import {
   stabilizeMessageKeys,
 } from "./services/messageService";
 import type { AppConfig, Message, Task } from "./types";
+import { hasAuthenticatedConfig } from "./types";
 import { Sidebar } from "./components/Sidebar";
 import { ChatThread } from "./components/ChatThread";
 import { ChatInput } from "./components/ChatInput";
 import { UserIdModal } from "./components/UserIdModal";
+import { api } from "./api";
 
 type DrawerKind = "skill" | "mcp" | "model" | null;
 
@@ -103,6 +105,12 @@ export default function App() {
     return rows;
   }, []);
 
+  const refreshConfig = useCallback(async () => {
+    const latest = await api.getConfig();
+    setConfig(latest);
+    return latest;
+  }, []);
+
   useEffect(() => {
     (async () => {
       try {
@@ -126,7 +134,7 @@ export default function App() {
   }, [config?.projectName, userId]);
 
   useEffect(() => {
-    if (!userId || !config) return;
+    if (!userId || !hasAuthenticatedConfig(config)) return;
     if (tasksBootstrappedForUserRef.current === userId) return;
 
     let cancelled = false;
@@ -193,6 +201,7 @@ export default function App() {
     setLoginLoading(true);
     try {
       const session = await appDataService.login(username, password);
+      await refreshConfig();
       setUserId(session.user_id.trim());
     } catch (err) {
       uiError("login failed", err);
@@ -204,6 +213,7 @@ export default function App() {
 
   async function handleLogout() {
     setBootError(null);
+    const projectName = config?.projectName;
     try {
       await appDataService.logout();
     } catch (err) {
@@ -219,13 +229,19 @@ export default function App() {
     setQueuePausedByTaskId({});
     pendingSteerRef.current = null;
     setDrawer(null);
-    if (config?.projectName) {
-      document.title = formatBrandTitle(config.projectName);
+    try {
+      await refreshConfig();
+    } catch (err) {
+      uiError("config refresh after logout failed", err);
+      setConfig((prev) => (prev ? { projectName: prev.projectName } : null));
+    }
+    if (projectName) {
+      document.title = formatBrandTitle(projectName);
     }
   }
 
   async function handleNewTask() {
-    if (!config) return;
+    if (!hasAuthenticatedConfig(config)) return;
     try {
       const task = await appDataService.createTask(buildNewTaskDefaults(config, activeTask));
       setTasks((prev) => [task, ...prev]);

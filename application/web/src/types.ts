@@ -33,12 +33,31 @@ export interface Message {
 
 export interface AppConfig {
   projectName: string;
+  /** Present only after authentication. */
+  skills?: string[];
+  mcp_servers?: string[];
+  models?: string[];
+  default_model?: string;
+  default_skills?: string[];
+  default_mcp_servers?: string[];
+}
+
+/** True when /api/config returned authenticated capability catalogs. */
+export function hasAuthenticatedConfig(
+  config: AppConfig | null | undefined,
+): config is AppConfig & {
   skills: string[];
   mcp_servers: string[];
   models: string[];
   default_model: string;
-  default_skills: string[];
-  default_mcp_servers: string[];
+} {
+  return Boolean(
+    config &&
+      Array.isArray(config.skills) &&
+      Array.isArray(config.mcp_servers) &&
+      Array.isArray(config.models) &&
+      typeof config.default_model === "string",
+  );
 }
 
 export interface StreamEvent {

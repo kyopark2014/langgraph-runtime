@@ -514,7 +514,7 @@ function MarkdownText({ content }: { content: string }) {
 | `GET` | `/api/health` | 헬스체크 |
 | `GET` | `/api/session` | 세션 조회 (HMAC 서명 Cookie 검증) |
 | `POST` | `/api/session/login` | Cognito username/password 로그인 → 세션 생성 |
-| `GET` | `/api/config` | Skill·MCP·Model 목록 및 기본값 |
+| `GET` | `/api/config` | 로그인 전: projectName만. 인증 후: Skill·MCP·Model 목록 및 기본값 |
 | `GET`/`POST` | `/api/tasks` | 태스크 목록·생성 (`runtime_session_id` 발급) |
 | `GET`/`PATCH`/`DELETE` | `/api/tasks/{id}` | 태스크 조회·수정·삭제 |
 | `GET` | `/api/tasks/{id}/messages` | 태스크 메시지 목록 |
