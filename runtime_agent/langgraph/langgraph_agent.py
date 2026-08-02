@@ -42,8 +42,9 @@ from urllib.parse import quote
 from langchain_core.tools import tool
 
 WORKING_DIR = os.path.dirname(os.path.abspath(__file__))
-# Per-user artifacts: {SESSION_STORAGE_DIR}/{user_id}/artifacts (set via set_user_artifacts).
+# Per-user artifacts/skills under SESSION_STORAGE_DIR (set via set_user_workspace).
 ARTIFACTS_DIR = utils.get_user_artifacts_dir("default")
+USER_SKILLS_DIR = utils.get_user_skills_dir("default")
 
 _py_ver = f"{sys.version_info.major}.{sys.version_info.minor}"
 _user_bin = os.path.expanduser(f"~/Library/Python/{_py_ver}/bin")
@@ -93,14 +94,72 @@ def set_user_artifacts(user_id: str | None) -> str:
     exec_globals = globals().get("_exec_globals")
     if isinstance(exec_globals, dict):
         exec_globals["ARTIFACTS_DIR"] = artifacts_dir
+        if "USER_SKILLS_DIR" in globals():
+            exec_globals["USER_SKILLS_DIR"] = USER_SKILLS_DIR
     logger.info(f"ARTIFACTS_DIR set for user {user_id!r}: {artifacts_dir}")
     return artifacts_dir
 
 
+def set_user_skills(user_id: str | None) -> str:
+    """Point USER_SKILLS_DIR and ensure per-user skills.list exists."""
+    global USER_SKILLS_DIR
+    skills_dir = utils.ensure_user_skills_dir(user_id)
+    USER_SKILLS_DIR = skills_dir
+    utils.ensure_user_skills_list(user_id)
+    exec_globals = globals().get("_exec_globals")
+    if isinstance(exec_globals, dict):
+        exec_globals["USER_SKILLS_DIR"] = skills_dir
+    logger.info(f"USER_SKILLS_DIR set for user {user_id!r}: {skills_dir}")
+    return skills_dir
+
+
+def set_user_workspace(user_id: str | None) -> tuple[str, str]:
+    """Configure per-user artifacts + skills dirs; create skills.list if missing."""
+    artifacts_dir = set_user_artifacts(user_id)
+    skills_dir = set_user_skills(user_id)
+    return artifacts_dir, skills_dir
+
+
+def _expand_user_skills_token(raw: str) -> str:
+    """Expand $USER_SKILLS_DIR / ${USER_SKILLS_DIR} using the current workspace path."""
+    if not USER_SKILLS_DIR or "$" not in raw:
+        return raw
+    expanded = raw
+    for token in ("${USER_SKILLS_DIR}", "$USER_SKILLS_DIR", "${user_skills_dir}", "$user_skills_dir"):
+        expanded = expanded.replace(token, USER_SKILLS_DIR)
+    return expanded
+
+
+def _path_is_under(path: str, root: str) -> bool:
+    if not path or not root:
+        return False
+    try:
+        norm_path = os.path.normpath(path)
+        norm_root = os.path.normpath(root)
+        return os.path.commonpath([norm_path, norm_root]) == norm_root
+    except ValueError:
+        return False
+
+
 def _resolve_workdir_path(filepath: str) -> str:
-    """Resolve filepath; map relative artifacts/ onto the active ARTIFACTS_DIR."""
-    if os.path.isabs(filepath):
+    """Resolve filepath; map artifacts/ onto ARTIFACTS_DIR; allow USER_SKILLS_DIR."""
+    if not filepath:
         return filepath
+
+    filepath = _expand_user_skills_token(filepath)
+
+    if os.path.isabs(filepath):
+        if _path_is_under(filepath, USER_SKILLS_DIR):
+            return filepath
+        if os.path.exists(filepath):
+            return filepath
+        basename = os.path.basename(filepath.rstrip("/"))
+        if basename:
+            candidate = os.path.join(ARTIFACTS_DIR, basename)
+            if os.path.exists(candidate):
+                return candidate
+        return filepath
+
     normalized = filepath.replace("\\", "/").lstrip("./")
     if normalized == "artifacts" or normalized.startswith("artifacts/"):
         suffix = normalized[len("artifacts") :].lstrip("/")
@@ -314,7 +373,8 @@ _exec_globals = {
     "re": _re,
     "requests": _requests,
     "WORKING_DIR": WORKING_DIR,
-    "ARTIFACTS_DIR": ARTIFACTS_DIR,  # updated by set_user_artifacts()
+    "ARTIFACTS_DIR": ARTIFACTS_DIR,  # updated by set_user_workspace()
+    "USER_SKILLS_DIR": USER_SKILLS_DIR,  # updated by set_user_workspace()
     "register_korean_font": register_korean_font,
 }
 
@@ -351,6 +411,7 @@ def execute_code(code: str) -> str:
     Path variables (pre-defined, do NOT redefine):
     - WORKING_DIR: absolute path to application directory
     - ARTIFACTS_DIR: absolute path to this user's artifacts ({SESSION_STORAGE_DIR}/{user_id}/artifacts)
+    - USER_SKILLS_DIR: absolute path to this user's skills ({SESSION_STORAGE_DIR}/{user_id}/skills)
     - register_korean_font(): registers Nanum TTF or CID fallback for ReportLab; returns font name str
 
     Args:
@@ -363,6 +424,7 @@ def execute_code(code: str) -> str:
     logger.info(f"###### execute_code ######")
     os.makedirs(ARTIFACTS_DIR, exist_ok=True)
     _exec_globals["ARTIFACTS_DIR"] = ARTIFACTS_DIR
+    _exec_globals["USER_SKILLS_DIR"] = USER_SKILLS_DIR
     before_files = _working_dir_files_mtime_snapshot()
 
     old_cwd = os.getcwd()

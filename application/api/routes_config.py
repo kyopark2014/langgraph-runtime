@@ -16,6 +16,7 @@ def get_config(request: Request):
     Unauthenticated clients get only what the login screen needs (project name).
     Model / MCP / skill catalogs require a session.
     """
-    if not get_optional_user_id(request):
+    session_user = get_optional_user_id(request)
+    if not session_user:
         return get_public_config()
-    return get_application_config()
+    return get_application_config(session_user)

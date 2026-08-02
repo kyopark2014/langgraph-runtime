@@ -40,6 +40,10 @@ DEFAULT_MODEL = "Claude 4.6 Sonnet"
 
 def load_capability_list(filename: str) -> list[str]:
     path = os.path.join(_APPLICATION_DIR, filename)
+    return load_capability_list_from_path(path)
+
+
+def load_capability_list_from_path(path: str) -> list[str]:
     try:
         with open(path, "r", encoding="utf-8") as f:
             return [
@@ -60,9 +64,13 @@ def get_public_config() -> dict[str, Any]:
     }
 
 
-def get_application_config() -> dict[str, Any]:
+def get_application_config(user_id: str | None = None) -> dict[str, Any]:
     """Full UI capability catalogs. Call only for authenticated sessions."""
-    skill_options = load_capability_list("skills.list")
+    skills_path = utils.ensure_user_skills_list(user_id) if user_id else os.path.join(
+        _APPLICATION_DIR, "skills.list"
+    )
+    skill_options = load_capability_list_from_path(skills_path)
+    logger.info("Loaded skills from %s (%d)", skills_path, len(skill_options))
     mcp_options = load_capability_list("mcp.list")
     default_skills, default_mcp = utils.get_initial_tool_defaults()
     config = utils.load_config()

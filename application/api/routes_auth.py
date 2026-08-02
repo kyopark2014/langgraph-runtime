@@ -174,6 +174,8 @@ def login(body: LoginRequest, request: Request, response: Response) -> SessionRe
     user_id = _authenticate_with_cognito(username, password)
     _set_session_cookie(response, request, user_id)
     utils.ensure_user_artifacts_dir(user_id)
+    utils.ensure_user_skills_dir(user_id)
+    utils.ensure_user_skills_list(user_id)
     return SessionResponse(user_id=user_id)
 
 
@@ -189,6 +191,8 @@ def get_session(request: Request, response: Response) -> SessionResponse | None:
     if not user_id:
         return None
     utils.ensure_user_artifacts_dir(user_id)
+    utils.ensure_user_skills_dir(user_id)
+    utils.ensure_user_skills_list(user_id)
     if not cloudfront_cookies.set_signed_cookies(
         response,
         secure=_cookie_secure(request),
