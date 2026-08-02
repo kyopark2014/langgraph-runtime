@@ -173,6 +173,7 @@ def login(body: LoginRequest, request: Request, response: Response) -> SessionRe
         raise HTTPException(status_code=400, detail="username and password are required")
     user_id = _authenticate_with_cognito(username, password)
     _set_session_cookie(response, request, user_id)
+    utils.ensure_user_artifacts_dir(user_id)
     return SessionResponse(user_id=user_id)
 
 
@@ -187,6 +188,7 @@ def get_session(request: Request, response: Response) -> SessionResponse | None:
     user_id = get_optional_user_id(request)
     if not user_id:
         return None
+    utils.ensure_user_artifacts_dir(user_id)
     if not cloudfront_cookies.set_signed_cookies(
         response,
         secure=_cookie_secure(request),

@@ -17,6 +17,42 @@ logger = logging.getLogger("utils")
 
 workingDir = os.path.dirname(os.path.abspath(__file__))
 config_path = os.path.join(workingDir, "config.json")
+
+SESSION_STORAGE_DIR = os.environ.get(
+    "SESSION_STORAGE_DIR",
+    "/mnt/workspace"
+    if os.path.isdir("/mnt/workspace")
+    else os.path.join(workingDir, ".session_storage"),
+)
+
+
+def sanitize_user_path_segment(user_id: str | None) -> str | None:
+    """Return a safe single path segment for per-user workspace folders, or None."""
+    if not user_id:
+        return None
+    segment = (
+        str(user_id)
+        .strip()
+        .replace("/", "_")
+        .replace("\\", "_")
+        .replace("..", "_")
+    )
+    return segment or None
+
+
+def get_user_artifacts_dir(user_id: str | None) -> str:
+    """Absolute path to {SESSION_STORAGE_DIR}/{user_id}/artifacts (does not create)."""
+    segment = sanitize_user_path_segment(user_id) or "default"
+    return os.path.join(SESSION_STORAGE_DIR, segment, "artifacts")
+
+
+def ensure_user_artifacts_dir(user_id: str | None) -> str:
+    """Create {SESSION_STORAGE_DIR}/{user_id}/artifacts if needed and return it."""
+    artifacts_dir = get_user_artifacts_dir(user_id)
+    os.makedirs(artifacts_dir, exist_ok=True)
+    logger.info("user artifacts dir ready: %s", artifacts_dir)
+    return artifacts_dir
+
     
 def load_config():
     config = None

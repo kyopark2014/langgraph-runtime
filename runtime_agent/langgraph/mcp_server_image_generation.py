@@ -41,7 +41,25 @@ except Exception as e:
 
 
 WORKING_DIR = os.path.dirname(os.path.abspath(__file__))
-ARTIFACTS_DIR = os.path.join(WORKING_DIR, "artifacts")
+
+
+def _artifacts_dir() -> str:
+    """Per-user artifacts under {SESSION_STORAGE_DIR}/{user_id}/artifacts."""
+    try:
+        import utils
+        user_id = (os.environ.get("AGENTCORE_USER_ID") or "").strip() or "default"
+        return utils.ensure_user_artifacts_dir(user_id)
+    except Exception:
+        root = os.environ.get(
+            "SESSION_STORAGE_DIR",
+            "/mnt/workspace"
+            if os.path.isdir("/mnt/workspace")
+            else os.path.join(WORKING_DIR, ".session_storage"),
+        )
+        fallback = os.path.join(root, "default", "artifacts")
+        os.makedirs(fallback, exist_ok=True)
+        return fallback
+
 
 def _has_sharing_url() -> bool:
     """Check if sharing_url is configured in config.json."""
@@ -109,8 +127,8 @@ def _save_and_upload(result: dict, prefix: str = "sd35l") -> dict:
                 paths.append(url)
                 continue
 
-        os.makedirs(ARTIFACTS_DIR, exist_ok=True)
-        local_path = os.path.join(ARTIFACTS_DIR, filename)
+        artifacts_dir = _artifacts_dir()
+        local_path = os.path.join(artifacts_dir, filename)
         with open(local_path, "wb") as f:
             f.write(image_bytes)
         paths.append(local_path)

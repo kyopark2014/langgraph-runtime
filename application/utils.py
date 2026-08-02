@@ -18,6 +18,42 @@ logger = logging.getLogger("utils")
 script_dir = os.path.dirname(os.path.abspath(__file__))
 config_path = os.path.join(script_dir, "config.json")
 favorite_tools_path = os.path.join(script_dir, "favorite_tools.json")
+
+SESSION_STORAGE_DIR = os.environ.get(
+    "SESSION_STORAGE_DIR",
+    "/mnt/workspace"
+    if os.path.isdir("/mnt/workspace")
+    else os.path.join(script_dir, ".session_storage"),
+)
+
+
+def sanitize_user_path_segment(user_id: str | None) -> str | None:
+    """Return a safe single path segment for per-user workspace folders, or None."""
+    if not user_id:
+        return None
+    segment = (
+        str(user_id)
+        .strip()
+        .replace("/", "_")
+        .replace("\\", "_")
+        .replace("..", "_")
+    )
+    return segment or None
+
+
+def get_user_artifacts_dir(user_id: str | None) -> str:
+    """Absolute path to {SESSION_STORAGE_DIR}/{user_id}/artifacts (does not create)."""
+    segment = sanitize_user_path_segment(user_id) or "default"
+    return os.path.join(SESSION_STORAGE_DIR, segment, "artifacts")
+
+
+def ensure_user_artifacts_dir(user_id: str | None) -> str:
+    """Create {SESSION_STORAGE_DIR}/{user_id}/artifacts if needed and return it."""
+    artifacts_dir = get_user_artifacts_dir(user_id)
+    os.makedirs(artifacts_dir, exist_ok=True)
+    logger.info("user artifacts dir ready: %s", artifacts_dir)
+    return artifacts_dir
+
     
 def load_config():
     config = None
@@ -122,17 +158,7 @@ def get_contents_type(file_name: str) -> str:
 
 def _sanitize_s3_user_segment(user_id: str | None) -> str | None:
     """Return a safe single path segment for per-user S3 folders, or None."""
-    if not user_id:
-        return None
-    # Collapse path separators so user_id cannot escape the intended prefix.
-    segment = (
-        str(user_id)
-        .strip()
-        .replace("/", "_")
-        .replace("\\", "_")
-        .replace("..", "_")
-    )
-    return segment or None
+    return sanitize_user_path_segment(user_id)
 
 
 def upload_to_s3(
