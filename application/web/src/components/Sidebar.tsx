@@ -1,11 +1,35 @@
-import { useRef } from "react";
+import { useEffect, useRef, useState } from "react";
 import { formatBrandTitle } from "../formatBrandTitle";
+import { useTheme } from "../hooks/useTheme";
+import type { Theme } from "../theme";
 import type { AppConfig, Task } from "../types";
 import { ConfigDrawer } from "./ConfigDrawer";
 import { TaskListItem } from "./TaskListItem";
-import { GuardrailIcon, LogoutIcon, McpIcon, MemoryIcon, ModelIcon, NewTaskIcon, SkillIcon, CloseIcon } from "./SidebarIcons";
+import {
+  AppearanceIcon,
+  ChevronIcon,
+  GuardrailIcon,
+  LogoutIcon,
+  McpIcon,
+  MemoryIcon,
+  ModelIcon,
+  NewTaskIcon,
+  SettingsIcon,
+  SkillIcon,
+  CloseIcon,
+} from "./SidebarIcons";
 
-type DrawerKind = "skill" | "mcp" | "model" | null;
+type DrawerKind = "skill" | "mcp" | "model" | "appearance" | null;
+
+const THEME_OPTIONS = ["Light", "Dark"] as const;
+
+function themeToLabel(theme: Theme): string {
+  return theme === "light" ? "Light" : "Dark";
+}
+
+function labelToTheme(label: string): Theme {
+  return label === "Light" ? "light" : "dark";
+}
 
 interface Props {
   userId: string;
@@ -19,7 +43,7 @@ interface Props {
   onSelectTask: (id: string) => void;
   onOpenDrawer: (kind: DrawerKind) => void;
   onCloseDrawer: () => void;
-  onPatchTask: (taskId: string, patch: Partial<Task>) => void;
+  onPatchTask: (taskId: string, patch: Partial<Task>) => void | Promise<void>;
   onDeleteTask: (taskId: string) => void;
   onLogout: () => void;
 }
@@ -43,12 +67,37 @@ export function Sidebar({
   const skillBtnRef = useRef<HTMLButtonElement>(null);
   const mcpBtnRef = useRef<HTMLButtonElement>(null);
   const modelBtnRef = useRef<HTMLButtonElement>(null);
+  const appearanceBtnRef = useRef<HTMLButtonElement>(null);
+  const settingsSectionRef = useRef<HTMLDivElement>(null);
+  const [settingsExpanded, setSettingsExpanded] = useState(false);
+  const { theme, setTheme } = useTheme();
   const skills = activeTask?.skills ?? config?.default_skills ?? [];
   const mcpServers = activeTask?.mcp_servers ?? config?.default_mcp_servers ?? [];
   const modelName = activeTask?.model_name ?? config?.default_model ?? "";
   const brandTitle = formatBrandTitle(config?.projectName ?? "agent", userId);
   const pinnedTasks = tasks.filter((task) => task.pinned);
   const regularTasks = tasks.filter((task) => !task.pinned);
+
+  function collapseSettings() {
+    setSettingsExpanded(false);
+    onCloseDrawer();
+  }
+
+  useEffect(() => {
+    if (!settingsExpanded) return;
+
+    function onPointerDown(e: MouseEvent) {
+      const target = e.target;
+      if (!(target instanceof Element)) return;
+      if (settingsSectionRef.current?.contains(target)) return;
+      if (target.closest(".config-popover")) return;
+      if (target.closest(".modal-overlay")) return;
+      collapseSettings();
+    }
+
+    document.addEventListener("mousedown", onPointerDown);
+    return () => document.removeEventListener("mousedown", onPointerDown);
+  }, [settingsExpanded, onCloseDrawer]);
 
   function renderTask(task: Task, hidePinBadge = false) {
     return (
@@ -57,7 +106,10 @@ export function Sidebar({
         task={task}
         active={activeTask?.id === task.id}
         hidePinBadge={hidePinBadge}
-        onSelect={() => onSelectTask(task.id)}
+        onSelect={() => {
+          collapseSettings();
+          onSelectTask(task.id);
+        }}
         onDelete={() => onDeleteTask(task.id)}
         onRename={(title) => onPatchTask(task.id, { title })}
         onTogglePin={() => onPatchTask(task.id, { pinned: !task.pinned })}
@@ -67,6 +119,15 @@ export function Sidebar({
 
   function toggleDrawer(kind: Exclude<DrawerKind, null>) {
     onOpenDrawer(drawer === kind ? null : kind);
+  }
+
+  function handleSettingApplied() {
+    collapseSettings();
+  }
+
+  function handleDrawerClose() {
+    onCloseDrawer();
+    setSettingsExpanded(false);
   }
 
   return (
@@ -97,7 +158,14 @@ export function Sidebar({
           </div>
         </div>
 
-        <button type="button" className="sidebar-menu-btn" onClick={onNewTask}>
+        <button
+          type="button"
+          className="sidebar-menu-btn"
+          onClick={() => {
+            collapseSettings();
+            onNewTask();
+          }}
+        >
           <NewTaskIcon className="sidebar-icon" />
           <span>New task</span>
         </button>
@@ -117,75 +185,120 @@ export function Sidebar({
           )}
         </div>
 
-        <div className="sidebar-section">
-          <div className="section-label">Configuration</div>
-          <button
-            ref={skillBtnRef}
-            type="button"
-            className={`sidebar-menu-btn${drawer === "skill" ? " is-active" : ""}`}
-            aria-expanded={drawer === "skill"}
-            aria-haspopup="dialog"
-            onClick={() => toggleDrawer("skill")}
-            disabled={!activeTask}
-          >
-            <SkillIcon className="sidebar-icon" />
-            <span>Skill ({skills.length})</span>
-          </button>
-          <button
-            ref={mcpBtnRef}
-            type="button"
-            className={`sidebar-menu-btn${drawer === "mcp" ? " is-active" : ""}`}
-            aria-expanded={drawer === "mcp"}
-            aria-haspopup="dialog"
-            onClick={() => toggleDrawer("mcp")}
-            disabled={!activeTask}
-          >
-            <McpIcon className="sidebar-icon" />
-            <span>MCP ({mcpServers.length})</span>
-          </button>
-          <button
-            ref={modelBtnRef}
-            type="button"
-            className={`sidebar-menu-btn${drawer === "model" ? " is-active" : ""}`}
-            aria-expanded={drawer === "model"}
-            aria-haspopup="dialog"
-            title={modelName || "Model"}
-            onClick={() => toggleDrawer("model")}
-            disabled={!activeTask}
-          >
-            <ModelIcon className="sidebar-icon" />
-            <span>{modelName || "Model"}</span>
-          </button>
-        </div>
 
-        <div className="sidebar-section">
-          <div className="section-label">Settings</div>
-          <label className="sidebar-menu-btn settings-toggle">
-            <GuardrailIcon className="sidebar-icon" />
-            <span>Guardrail</span>
-            <input
-              type="checkbox"
-              checked={activeTask?.guardrail_enabled ?? false}
-              disabled={!activeTask}
-              onChange={(e) =>
-                activeTask &&
-                onPatchTask(activeTask.id, { guardrail_enabled: e.target.checked })
+        <button
+          ref={modelBtnRef}
+          type="button"
+          className={`sidebar-menu-btn${drawer === "model" ? " is-active" : ""}`}
+          aria-expanded={drawer === "model"}
+          aria-haspopup="dialog"
+          title={modelName || "Model"}
+          disabled={!activeTask}
+          onClick={() => {
+            setSettingsExpanded(false);
+            if (drawer === "model") {
+              onCloseDrawer();
+            } else {
+              onOpenDrawer("model");
+            }
+          }}
+        >
+          <ModelIcon className="sidebar-icon" />
+          <span>{modelName || "Model"}</span>
+        </button>
+
+        <div
+          ref={settingsSectionRef}
+          className={`sidebar-section${settingsExpanded ? " is-expanded" : ""}`}
+        >
+          <button
+            type="button"
+            className="section-toggle"
+            aria-expanded={settingsExpanded}
+            onClick={() => {
+              if (settingsExpanded) {
+                collapseSettings();
+                return;
               }
-            />
-          </label>
-          <label className="sidebar-menu-btn settings-toggle">
-            <MemoryIcon className="sidebar-icon" />
-            <span>Memory</span>
-            <input
-              type="checkbox"
-              checked={activeTask?.memory_enabled ?? true}
-              disabled={!activeTask}
-              onChange={(e) =>
-                activeTask &&
-                onPatchTask(activeTask.id, { memory_enabled: e.target.checked })
-              }
-            />
-          </label>
+              onCloseDrawer();
+              setSettingsExpanded(true);
+            }}
+          >
+            <SettingsIcon className="sidebar-icon" />
+            <span>Settings</span>
+            <ChevronIcon className="section-chevron" />
+          </button>
+          {settingsExpanded && (
+            <div className="sidebar-section-body">
+              <button
+                ref={skillBtnRef}
+                type="button"
+                className={`sidebar-menu-btn${drawer === "skill" ? " is-active" : ""}`}
+                aria-expanded={drawer === "skill"}
+                aria-haspopup="dialog"
+                onClick={() => toggleDrawer("skill")}
+                disabled={!activeTask}
+              >
+                <SkillIcon className="sidebar-icon" />
+                <span>Skill ({skills.length})</span>
+              </button>
+              <button
+                ref={mcpBtnRef}
+                type="button"
+                className={`sidebar-menu-btn${drawer === "mcp" ? " is-active" : ""}`}
+                aria-expanded={drawer === "mcp"}
+                aria-haspopup="dialog"
+                onClick={() => toggleDrawer("mcp")}
+                disabled={!activeTask}
+              >
+                <McpIcon className="sidebar-icon" />
+                <span>MCP ({mcpServers.length})</span>
+              </button>
+              <label className="sidebar-menu-btn settings-toggle">
+                <GuardrailIcon className="sidebar-icon" />
+                <span>Guardrail</span>
+                <input
+                  type="checkbox"
+                  checked={activeTask?.guardrail_enabled ?? false}
+                  disabled={!activeTask}
+                  onChange={(e) => {
+                    if (!activeTask) return;
+                    onPatchTask(activeTask.id, {
+                      guardrail_enabled: e.target.checked,
+                    });
+                    handleSettingApplied();
+                  }}
+                />
+              </label>
+              <label className="sidebar-menu-btn settings-toggle">
+                <MemoryIcon className="sidebar-icon" />
+                <span>Memory</span>
+                <input
+                  type="checkbox"
+                  checked={activeTask?.memory_enabled ?? true}
+                  disabled={!activeTask}
+                  onChange={(e) => {
+                    if (!activeTask) return;
+                    onPatchTask(activeTask.id, {
+                      memory_enabled: e.target.checked,
+                    });
+                    handleSettingApplied();
+                  }}
+                />
+              </label>
+              <button
+                ref={appearanceBtnRef}
+                type="button"
+                className={`sidebar-menu-btn${drawer === "appearance" ? " is-active" : ""}`}
+                aria-expanded={drawer === "appearance"}
+                aria-haspopup="dialog"
+                onClick={() => toggleDrawer("appearance")}
+              >
+                <AppearanceIcon className="sidebar-icon" />
+                <span>Appearance ({themeToLabel(theme)})</span>
+              </button>
+            </div>
+          )}
         </div>
       </aside>
 
@@ -206,7 +319,7 @@ export function Sidebar({
           selected={mcpServers}
           anchorEl={mcpBtnRef.current}
           onChange={(next) => activeTask && onPatchTask(activeTask.id, { mcp_servers: next })}
-          onClose={onCloseDrawer}
+          onClose={handleDrawerClose}
         />
       )}
       {drawer === "model" && config?.models && activeTask && (
@@ -220,6 +333,19 @@ export function Sidebar({
             activeTask && next[0] && onPatchTask(activeTask.id, { model_name: next[0] })
           }
           onClose={onCloseDrawer}
+        />
+      )}
+      {drawer === "appearance" && (
+        <ConfigDrawer
+          title="Appearance"
+          options={[...THEME_OPTIONS]}
+          selected={[themeToLabel(theme)]}
+          mode="single"
+          anchorEl={appearanceBtnRef.current}
+          onChange={(next) => {
+            if (next[0]) setTheme(labelToTheme(next[0]));
+          }}
+          onClose={handleDrawerClose}
         />
       )}
     </>
