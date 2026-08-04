@@ -7,3 +7,5 @@ config.json
 # local task database
 data/
 .session_storage/
+graph/corpus/
+graph/out/

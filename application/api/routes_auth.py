@@ -160,6 +160,17 @@ def _set_session_cookie(response: Response, request: Request, user_id: str) -> N
         )
 
 
+
+def _kick_graph_job(user_id: str) -> None:
+    """Fire-and-forget background graph extract (respects cooldown / running lock)."""
+    try:
+        from application.graph_jobs import ensure_graph_job
+
+        ensure_graph_job(user_id)
+    except Exception:
+        logger.exception("Failed to schedule graph job for %s", user_id)
+
+
 def get_optional_user_id(request: Request) -> str | None:
     """Return verified user_id from the HMAC session cookie, or None."""
     return session_cookie.verify_session(request.cookies.get(SESSION_COOKIE) or "")
@@ -176,6 +187,12 @@ def login(body: LoginRequest, request: Request, response: Response) -> SessionRe
     utils.ensure_user_artifacts_dir(user_id)
     utils.ensure_user_skills_dir(user_id)
     utils.ensure_user_skills_list(user_id)
+
+    try:
+        utils.ensure_user_graph_dir(user_id)
+    except Exception:
+        logger.exception("Failed to ensure graph dir for %s", user_id)
+    _kick_graph_job(user_id)
     return SessionResponse(user_id=user_id)
 
 
@@ -193,6 +210,11 @@ def get_session(request: Request, response: Response) -> SessionResponse | None:
     utils.ensure_user_artifacts_dir(user_id)
     utils.ensure_user_skills_dir(user_id)
     utils.ensure_user_skills_list(user_id)
+    try:
+        utils.ensure_user_graph_dir(user_id)
+    except Exception:
+        logger.exception("Failed to ensure graph dir for %s", user_id)
+    _kick_graph_job(user_id)
     if not cloudfront_cookies.set_signed_cookies(
         response,
         secure=_cookie_secure(request),

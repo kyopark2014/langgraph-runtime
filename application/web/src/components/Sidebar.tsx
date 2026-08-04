@@ -18,6 +18,7 @@ import {
   SkillIcon,
   CloseIcon,
 } from "./SidebarIcons";
+import { KnowledgeGraphModal } from "./KnowledgeGraphModal";
 
 type DrawerKind = "skill" | "mcp" | "model" | "appearance" | null;
 
@@ -70,6 +71,7 @@ export function Sidebar({
   const appearanceBtnRef = useRef<HTMLButtonElement>(null);
   const settingsSectionRef = useRef<HTMLDivElement>(null);
   const [settingsExpanded, setSettingsExpanded] = useState(false);
+  const [knowledgeGraphOpen, setKnowledgeGraphOpen] = useState(false);
   const { theme, setTheme } = useTheme();
   const skills = activeTask?.skills ?? config?.default_skills ?? [];
   const mcpServers = activeTask?.mcp_servers ?? config?.default_mcp_servers ?? [];
@@ -135,7 +137,18 @@ export function Sidebar({
       <aside className={`sidebar${open ? " sidebar-panel-open" : ""}`}>
         <div className="sidebar-header">
           <div className="brand-row">
-            <div className="brand">{brandTitle}</div>
+            <button
+              type="button"
+              className="brand brand-graph-btn"
+              title="Knowledge Graph 보기"
+              aria-label={`${brandTitle} Knowledge Graph 보기`}
+              onClick={() => {
+                collapseSettings();
+                setKnowledgeGraphOpen(true);
+              }}
+            >
+              {brandTitle}
+            </button>
             <div className="sidebar-header-actions">
               <button
                 type="button"
@@ -348,6 +361,14 @@ export function Sidebar({
           onClose={handleDrawerClose}
         />
       )}
-    </>
+    
+      {knowledgeGraphOpen && (
+        <KnowledgeGraphModal
+          userId={userId}
+          title={`${brandTitle} Knowledge Graph`}
+          onClose={() => setKnowledgeGraphOpen(false)}
+        />
+      )}
+</>
   );
 }

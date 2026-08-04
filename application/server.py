@@ -8,6 +8,7 @@ from fastapi.responses import FileResponse, HTMLResponse
 from fastapi.staticfiles import StaticFiles
 
 from application.api.routes_auth import router as auth_router
+from application.api.routes_graph import router as graph_router
 from application.api.routes_config import router as config_router
 from application.api.routes_tasks import router as tasks_router
 from application.api.routes_chat import router as chat_router
@@ -72,6 +73,7 @@ app = FastAPI(
 app.add_middleware(SecurityHeadersMiddleware)
 
 app.include_router(auth_router)
+app.include_router(graph_router)
 app.include_router(config_router)
 app.include_router(tasks_router)
 app.include_router(chat_router)

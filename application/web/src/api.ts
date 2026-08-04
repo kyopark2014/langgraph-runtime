@@ -51,7 +51,24 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
   return data;
 }
 
+
+export interface GraphStatus {
+  user_id: string;
+  exists: boolean;
+  path: string | null;
+  status: "idle" | "queued" | "running" | "ready" | "error" | "skipped_cooldown" | string;
+  error?: string | null;
+  last_success_at?: string | null;
+  cooldown_seconds?: number;
+  next_eligible_at?: string | null;
+}
+
 export const api = {
+  getGraphStatus: () => request<GraphStatus>("/api/graph/status"),
+  rebuildGraph: (force = false) =>
+    request<GraphStatus>(`/api/graph/rebuild${force ? "?force=1" : ""}`, {
+      method: "POST",
+    }),
   getSession: () => request<{ user_id: string } | null>("/api/session"),
   login: (username: string, password: string) =>
     request<{ user_id: string }>("/api/session/login", {
