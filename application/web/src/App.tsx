@@ -48,6 +48,7 @@ const LOAD_MESSAGES_ERROR_MESSAGE =
 
 export default function App() {
   const [userId, setUserId] = useState<string | null>(null);
+  const [knowledgeGraphEnabled, setKnowledgeGraphEnabled] = useState(true);
   const [authReady, setAuthReady] = useState(false);
   const [bootError, setBootError] = useState<string | null>(null);
   const [loginLoading, setLoginLoading] = useState(false);
@@ -114,10 +115,11 @@ export default function App() {
   useEffect(() => {
     (async () => {
       try {
-        const { config: cfg, userId: id } = await appDataService.loadBootState();
-        setConfig(cfg);
-        if (id) {
-          setUserId(id);
+        const boot = await appDataService.loadBootState();
+        setConfig(boot.config);
+        if (boot.userId) {
+          setUserId(boot.userId);
+          setKnowledgeGraphEnabled(boot.knowledgeGraphEnabled);
         }
       } catch (err) {
         uiError("boot failed", err);
@@ -203,6 +205,7 @@ export default function App() {
       const session = await appDataService.login(username, password);
       await refreshConfig();
       setUserId(session.user_id.trim());
+      setKnowledgeGraphEnabled(session.knowledge_graph_enabled ?? true);
     } catch (err) {
       uiError("login failed", err);
       setBootError(LOGIN_ERROR_MESSAGE);
@@ -222,6 +225,7 @@ export default function App() {
     tasksBootstrappedForUserRef.current = null;
     emptyTaskBootstrapRef.current = null;
     setUserId(null);
+    setKnowledgeGraphEnabled(true);
     setTasks([]);
     setActiveTaskId(null);
     setMessages([]);
@@ -528,6 +532,20 @@ export default function App() {
         onPatchTask={handlePatchTask}
         onDeleteTask={handleDeleteTask}
         onLogout={handleLogout}
+        knowledgeGraphEnabled={knowledgeGraphEnabled}
+        onPatchKnowledgeGraphEnabled={async (enabled) => {
+          setKnowledgeGraphEnabled(enabled);
+          try {
+            const session = await api.patchSessionSettings({
+              knowledge_graph_enabled: enabled,
+            });
+            setKnowledgeGraphEnabled(session.knowledge_graph_enabled ?? enabled);
+          } catch (err) {
+            setKnowledgeGraphEnabled(!enabled);
+            uiError("knowledge graph setting failed", err);
+            throw err;
+          }
+        }}
       />
       <div className="main-panel">
         <ChatThread

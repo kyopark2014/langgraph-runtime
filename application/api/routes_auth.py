@@ -57,6 +57,11 @@ class LoginRequest(BaseModel):
 
 class SessionResponse(BaseModel):
     user_id: str
+    knowledge_graph_enabled: bool = True
+
+
+class SessionSettingsPatch(BaseModel):
+    knowledge_graph_enabled: bool | None = None
 
 
 def _cognito_settings() -> tuple[str, str, str]:
@@ -163,12 +168,25 @@ def _set_session_cookie(response: Response, request: Request, user_id: str) -> N
 
 def _kick_graph_job(user_id: str) -> None:
     """Fire-and-forget background graph extract (respects cooldown / running lock)."""
+    if not utils.is_knowledge_graph_enabled(user_id):
+        logger.info("Knowledge Graph disabled for %s — skip extract", user_id)
+        return
     try:
         from application.graph_jobs import ensure_graph_job
 
         ensure_graph_job(user_id)
     except Exception:
         logger.exception("Failed to schedule graph job for %s", user_id)
+
+
+def _session_response(user_id: str) -> SessionResponse:
+    settings = utils.load_user_settings(user_id)
+    return SessionResponse(
+        user_id=user_id,
+        knowledge_graph_enabled=bool(
+            settings.get("knowledge_graph_enabled", True)
+        ),
+    )
 
 
 def get_optional_user_id(request: Request) -> str | None:
@@ -193,7 +211,7 @@ def login(body: LoginRequest, request: Request, response: Response) -> SessionRe
     except Exception:
         logger.exception("Failed to ensure graph dir for %s", user_id)
     _kick_graph_job(user_id)
-    return SessionResponse(user_id=user_id)
+    return _session_response(user_id)
 
 
 @router.post("", response_model=SessionResponse, deprecated=True)
@@ -214,7 +232,7 @@ def get_session(request: Request, response: Response) -> SessionResponse | None:
         utils.ensure_user_graph_dir(user_id)
     except Exception:
         logger.exception("Failed to ensure graph dir for %s", user_id)
-    _kick_graph_job(user_id)
+    # Do not kick graph on session poll — chat / login / rebuild trigger instead.
     if not cloudfront_cookies.set_signed_cookies(
         response,
         secure=_cookie_secure(request),
@@ -224,7 +242,23 @@ def get_session(request: Request, response: Response) -> SessionResponse | None:
             "CloudFront signed cookies not attached on session refresh "
             "(signing material missing?)"
         )
-    return SessionResponse(user_id=user_id)
+    return _session_response(user_id)
+
+
+@router.patch("/settings", response_model=SessionResponse)
+def patch_session_settings(
+    body: SessionSettingsPatch, request: Request
+) -> SessionResponse:
+    """Update per-user feature settings (e.g. Knowledge Graph toggle)."""
+    user_id = require_user_id(request)
+    updates: dict[str, bool] = {}
+    if body.knowledge_graph_enabled is not None:
+        updates["knowledge_graph_enabled"] = body.knowledge_graph_enabled
+    if updates:
+        utils.save_user_settings(user_id, **updates)
+    if updates.get("knowledge_graph_enabled") is True:
+        _kick_graph_job(user_id)
+    return _session_response(user_id)
 
 
 @router.delete("", status_code=204)

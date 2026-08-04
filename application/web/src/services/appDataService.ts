@@ -1,4 +1,5 @@
 import { api } from "../api";
+import type { SessionInfo } from "../api";
 import type { AppConfig, Message, Task } from "../types";
 
 export type CreateTaskDefaults = {
@@ -23,18 +24,23 @@ export const appDataService = {
   async loadBootState(): Promise<{
     config: AppConfig;
     userId: string | null;
+    knowledgeGraphEnabled: boolean;
   }> {
     try {
       const config = await api.getConfig();
       const session = await api.getSession();
       const userId = session?.user_id?.trim() || null;
-      return { config, userId };
+      return {
+        config,
+        userId,
+        knowledgeGraphEnabled: session?.knowledge_graph_enabled ?? true,
+      };
     } catch (error) {
       throw sanitizeError(error, "Failed to load application configuration.");
     }
   },
 
-  async login(username: string, password: string): Promise<{ user_id: string }> {
+  async login(username: string, password: string): Promise<SessionInfo> {
     try {
       return await api.login(username, password);
     } catch (error) {
