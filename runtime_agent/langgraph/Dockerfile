@@ -6,6 +6,10 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     curl \
     nodejs \
     npm \
+    # Hangul glyphs for matplotlib / ReportLab in execute_code
+    fonts-nanum \
+    fontconfig \
+    && fc-cache -f \
     && rm -rf /var/lib/apt/lists/*
 
 RUN pip install --upgrade "setuptools>=83.0.0" \

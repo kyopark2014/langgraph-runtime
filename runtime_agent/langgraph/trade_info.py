@@ -72,6 +72,9 @@ SUBJECT_TO_TICKER: Dict[str, str] = {
     "LG Electronics": "066570.KS",  # LG Electronics Corp    
     "LG이노텍": "011070.KS",  # LG 이노텍 Corp
     "LG Innotek": "011070.KS",  # LG Innotek Corp
+    "LG화학": "051910.KS",  # LG Chem Corp
+    "LG 화학": "051910.KS",  # LG Chem Corp
+    "LG Chem": "051910.KS",  # LG Chem Corp
     "LG에너지솔루션": "373220.KS",  # LG 에너지솔루션 Corp
     "LG디스플레이": "034220.KS",  # LG 디스플레이 Corp
     "HD현대일렉트릭": "267260.KS",  # HD 현대일렉트릭 Corp
@@ -188,14 +191,29 @@ def resolve_ticker(subject: str) -> str:
 
     # 3) Fallback: try searching candidates
     try:
-        candidates = search_ticker_candidates(subject, limit=1)
+        candidates = search_ticker_candidates(subject, limit=5)
     except Exception as exc:
         raise ValueError(f"Failed to resolve ticker for input {subject!r}: {exc}") from exc
 
-    if candidates:
-        return candidates[0].get("ticker", "") or (
-            f"{candidates[0].get('itemcode', '')}"  # very defensive fallback
-        )
+    for cand in candidates:
+        ticker = (cand.get("ticker") or "").strip()
+        itemcode = (cand.get("itemcode") or "").strip()
+        if not ticker and itemcode.isdigit() and len(itemcode) == 6 and itemcode != "000000":
+            suffix = ".KS"
+            market = (cand.get("market") or "").upper()
+            if "KOSDAQ" in market:
+                suffix = ".KQ"
+            ticker = f"{itemcode}{suffix}"
+        code = ticker.split(".")[0] if ticker else ""
+        if code.isdigit() and len(code) == 6 and code != "000000":
+            # Prefer exact company-name match when available.
+            if (cand.get("company_name") or "").replace(" ", "") == subject_no_space:
+                return ticker
+    for cand in candidates:
+        ticker = (cand.get("ticker") or "").strip()
+        code = ticker.split(".")[0] if ticker else ""
+        if code.isdigit() and len(code) == 6 and code != "000000":
+            return ticker
 
     raise ValueError(
         f"Unknown subject: {subject!r}. Provide a known company name or a valid ticker."
@@ -271,6 +289,8 @@ def search_ticker_candidates(query: str, limit: int = 5) -> List[Dict[str, str]]
             ticker_v = f"{code_v}{market_to_suffix(market_v)}"
         except Exception:
             continue
+        if not code_v.isdigit() or code_v == "000000":
+            continue
         results.append(
             {
                 "company_name": name_v,
@@ -280,6 +300,11 @@ def search_ticker_candidates(query: str, limit: int = 5) -> List[Dict[str, str]]
             }
         )
 
+    # Prefer exact name matches first.
+    q_ns = q.replace(" ", "")
+    results.sort(
+        key=lambda r: 0 if (r.get("company_name") or "").replace(" ", "") == q_ns else 1
+    )
     return results[: max(0, limit)]
 
 def _fetch_fdr(itemcode: str, period: int = 30) -> List[Dict[str, object]]:
@@ -383,7 +408,16 @@ def get_stock_trend(company_name: str = "NAVER", period: int = 30) -> Dict[str, 
                 prev_close = float(close_v)
 
     if not points:
-        logger.info("FDR returned no rows for last month trend.")
+        logger.info(
+            "FDR returned no rows for last month trend: company=%s ticker=%s itemcode=%s",
+            company_name,
+            ticker,
+            itemcode,
+        )
+        raise ValueError(
+            f"No stock price points for {company_name!r} (ticker={ticker}). "
+            "Check the company name or ticker mapping."
+        )
 
     result: Dict[str, object] = {
         "company_name": company_name,
@@ -486,6 +520,61 @@ def is_lower_than_ma20(company_name: str = "NAVER", period: int = 30) -> bool:
 
     return True if current_close < df['ma20'].values[-1] else False
     
+def _configure_korean_matplotlib_font() -> None:
+    """Register an installed Hangul TTF for stock charts.
+
+    matplotlib's cached ``ttflist`` often omits apt-installed Nanum until rebuilt,
+    and ``font.family = 'AppleGothic'`` never raises when missing (falls back to
+    DejaVu → □). Prefer ``addfont`` on known Nanum paths (fonts-nanum package).
+    """
+    plt.rcParams["axes.unicode_minus"] = False
+
+    ttf_candidates = (
+        "/usr/share/fonts/truetype/nanum/NanumGothic.ttf",
+        "/usr/share/fonts/truetype/nanum/NanumBarunGothic.ttf",
+        "/usr/share/fonts/nanum/NanumGothic.ttf",
+        os.path.join(script_dir, "assets", "NanumGothic-Regular.ttf"),
+        "/Library/Fonts/NanumGothic.ttf",
+        "/System/Library/Fonts/Supplemental/AppleGothic.ttf",
+        "/System/Library/Fonts/AppleSDGothicNeo.ttc",
+    )
+    for path in ttf_candidates:
+        if not os.path.isfile(path):
+            continue
+        try:
+            fm.fontManager.addfont(path)
+            name = fm.FontProperties(fname=path).get_name()
+            plt.rcParams["font.family"] = name
+            plt.rcParams["font.sans-serif"] = [
+                name,
+                "NanumGothic",
+                "Nanum Gothic",
+                "AppleGothic",
+                "DejaVu Sans",
+                "sans-serif",
+            ]
+            logger.info("Korean font set to: %s (%s)", name, path)
+            return
+        except Exception as exc:
+            logger.info("font add failed for %s: %s", path, exc)
+
+    # Fallback: names actually present in the current font manager.
+    korean_fonts = [
+        "NanumGothic",
+        "Nanum Gothic",
+        "NanumBarunGothic",
+        "AppleGothic",
+        "Apple SD Gothic Neo",
+        "Malgun Gothic",
+    ]
+    for font_name in korean_fonts:
+        if any(f.name == font_name for f in fm.fontManager.ttflist):
+            plt.rcParams["font.family"] = font_name
+            logger.info("Korean font set to: %s", font_name)
+            return
+    logger.warning("Could not set Korean font, using default font")
+
+
 def draw_stock_trend(trend: Dict[str, object]) -> Dict[str, List[str]]:
     """
     Draw graphs of the given trend.
@@ -500,25 +589,10 @@ def draw_stock_trend(trend: Dict[str, object]) -> Dict[str, List[str]]:
     # Graph showing stock trend (candlestick chart)
     ###########################################################################################
     try:
-        # Try common Korean fonts on macOS
-        korean_fonts = ['AppleGothic', 'NanumGothic', 'Malgun Gothic', 'Apple SD Gothic Neo']
-        font_found = False
-        for font_name in korean_fonts:
-            try:
-                plt.rcParams['font.family'] = font_name
-                plt.rcParams['axes.unicode_minus'] = False  # Fix minus sign display
-                font_found = True
-                logger.info(f"Korean font set to: {font_name}")
-                break
-            except Exception:
-                continue
-        if not font_found:
-            # Fallback: set to any available font
-            plt.rcParams['axes.unicode_minus'] = False
-            logger.warning("Could not set Korean font, using default font")
+        _configure_korean_matplotlib_font()
     except Exception as exc:
         logger.warning(f"Font setting failed: {exc}, continuing with default font")
-        plt.rcParams['axes.unicode_minus'] = False
+        plt.rcParams["axes.unicode_minus"] = False
 
     points = trend.get("points", [])
     if not points:

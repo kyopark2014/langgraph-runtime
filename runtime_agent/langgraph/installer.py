@@ -1481,33 +1481,46 @@ def push_to_ecr():
 
 
 def get_latest_image_tag(config):
-    """Get the latest image tag from ECR."""
+    """Return the image tag to deploy for AgentCore.
+
+    Prefer ``latest_image_tag`` written by the build that just finished. Falling
+    back to an unpaginated ECR ``describe_images`` sort can pick a stale tag
+    (seen: built 20260805172059 but runtime stayed on 20260805165556).
+    """
+    configured = (config.get("latest_image_tag") or "").strip()
+    if configured:
+        print(f"Using configured image tag: {configured}")
+        return configured
+
     try:
         aws_region = config['region']
         project_name = config.get('projectName')
         current_folder_name = os.path.basename(os.getcwd())
         repository_name = f"{project_name}_{current_folder_name}"
-        
+
         ecr_client = boto3.client('ecr', region_name=aws_region)
-        response = ecr_client.describe_images(repositoryName=repository_name)
-        images = response['imageDetails']
-        
-        if not images:
-            print(f"Error: No images found in repository {repository_name}")
+        images: list = []
+        token = None
+        while True:
+            kwargs = {"repositoryName": repository_name, "maxResults": 100}
+            if token:
+                kwargs["nextToken"] = token
+            response = ecr_client.describe_images(**kwargs)
+            images.extend(response.get("imageDetails") or [])
+            token = response.get("nextToken")
+            if not token:
+                break
+
+        tagged = [img for img in images if img.get("imageTags")]
+        if not tagged:
+            print(f"Error: No tagged images found in repository {repository_name}")
             return None
-        
-        # Get latest image
-        images_sorted = sorted(images, key=lambda x: x['imagePushedAt'], reverse=True)
-        latest_image = images_sorted[0]
-        
-        if 'imageTags' not in latest_image or not latest_image['imageTags']:
-            print(f"Error: Latest image has no tags")
-            return None
-        
-        image_tag = latest_image['imageTags'][0]
-        print(f"Latest image tag: {image_tag}")
+
+        images_sorted = sorted(tagged, key=lambda x: x["imagePushedAt"], reverse=True)
+        image_tag = images_sorted[0]["imageTags"][0]
+        print(f"Latest image tag from ECR: {image_tag}")
         return image_tag
-        
+
     except Exception as e:
         print(f"Error getting latest image tag: {e}")
         return None
