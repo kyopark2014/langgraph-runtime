@@ -74,6 +74,9 @@ distance_metric = "cosine"
 
 # S3 Files (AgentCore session storage)
 S3_FILES_SESSION_PREFIX = "agentcore-sessions/"
+S3_FILES_APP_DATA_PREFIX = "app-data/"
+APP_DATA_MOUNT_PATH = "/mnt/app-data"
+SESSION_STORAGE_MOUNT_PATH = "/mnt/workspace"
 
 # AgentCore Runtime 이름: project_name의 '-' → '_' (예: langgraph_runtime)
 # agent_runtime_name(project_name)
@@ -140,24 +143,26 @@ VPC (10.20.0.0/16)
     └── Gateway: S3 (ECR 레이어 pull용)
 ```
 
-### 4.5. S3 Files (AgentCore · ECS Session Storage)
+### 4.5. S3 Files (Session + App-data)
 
-VPC 생성 직후 `create_s3_files_session_storage()`가 아래를 **멱등**으로 프로비저닝합니다.
+VPC 생성 직후 session FS와 app-data FS를 **멱등**으로 프로비저닝합니다.
 
 | 리소스 | 설명 |
 |--------|------|
 | Sync IAM role | `role-s3files-sync-for-{project_name}` — S3 bucket ↔ NFS 동기화 |
-| File system | bucket `storage-for-...`, prefix `agentcore-sessions/` |
-| Mount targets | private subnet마다 1개 (Runtime·ECS와 AZ 정렬) |
-| Access point | 마운트 진입점 (`posix uid/gid: 0/0`) |
-| Client SGs | `agent-runtime-sg` + ECS SG → NFS 2049 |
+| Session FS | prefix `agentcore-sessions/` — Runtime only (`/mnt/workspace`) |
+| App-data FS | prefix `app-data/` — ECS only (`/mnt/app-data`) |
+| Mount targets | private subnet마다 FS별 1개 |
+| Access points | FS별 마운트 진입점 (`posix uid/gid: 0/0`) |
+| Client SGs | runtime SG ↔ session mount SG; ECS SG ↔ app-data mount SG (NFS 2049) |
 
-- **AgentCore**: `/mnt/workspace`에 마운트 → LangGraph checkpoint (`langgraph_checkpoints.sqlite`)
-- **ECS**: `/mnt/app-data`에 마운트 → `TASK_DB_MOUNT` / `TASK_DB_PROJECT`로 `tasks.db` 영속화
-- Runtime SG를 Bedrock/AgentCore/Secrets VPC endpoint에 연결 (`_ensure_agent_runtime_vpc_endpoint_access`)
+- **AgentCore**: `/mnt/workspace` → checkpoint / skills / artifacts
+- **ECS**: `/mnt/app-data` → `tasks.db` / graph / settings / litellm (`TASK_DB_MOUNT`)
+- 마이그레이션: 기존 `agentcore-sessions/`의 application-database·litellm·graph·settings → `app-data/`
+- Runtime SG를 Bedrock/AgentCore/Secrets VPC endpoint에 연결
 
-`apply_s3_files_config()`가 `application/config.json`에 `s3_files_*`, `agent_runtime_vpc_*` 키를 기록합니다.  
-Runtime(`runtime_agent/langgraph/installer.py`)은 access point ARN이 있으면 **`s3FilesAccessPoint` + VPC 모드**, 없으면 managed **`sessionStorage` + PUBLIC** 으로 생성합니다.
+`apply_s3_files_config()`가 `application/config.json`에 session·app-data `s3_files_*` 및 `agent_runtime_vpc_*` 키를 기록합니다.  
+Runtime은 session access point ARN이 있으면 **`s3FilesAccessPoint` + VPC 모드**, 없으면 managed **`sessionStorage` + PUBLIC** 으로 생성합니다.
 
 ### 5. Application Load Balancer
 - **타입**: Internet-facing Application Load Balancer
@@ -275,36 +280,14 @@ VPC·ALB·CloudFront 생성
 #### `get_or_create_alb_origin_header()` / `ensure_alb_listener_origin_protection()`
 Secrets Manager에 오리진 헤더 시크릿을 생성·재사용하고, ALB listener를 default 403 + 헤더 일치 시 forward로 맞춤
 
-#### `create_s3_files_session_storage(vpc_info, s3_bucket_name, *, ecs_sg_id="", ecs_task_role_name="")`
-AgentCore·ECS용 S3 Files 세션 스토리지 프로비저닝 (멱등).
+#### `create_s3_files_session_storage(vpc_info, s3_bucket_name)`
+Runtime 전용 S3 Files (`agentcore-sessions/` → `/mnt/workspace`). ECS는 마운트하지 않음.
 
-```python
-def create_s3_files_session_storage(
-    vpc_info: Dict[str, str],
-    s3_bucket_name: str,
-    *,
-    ecs_sg_id: str = "",
-    ecs_task_role_name: str = "",
-) -> Dict[str, object]:
-    # 1. _get_or_create_s3files_sync_role()
-    # 2. _ensure_s3_bucket_versioning_enabled()
-    # 3. _get_or_create_s3files_file_system()  # prefix: agentcore-sessions/
-    # 4. agent-runtime-sg + ECS SG + s3files-mount-sg (NFS 2049)
-    # 5. _ensure_s3files_mount_targets() per private subnet
-    # 6. _get_or_create_s3files_access_point()
-    # 7. file system policy + ensure_ecs_task_s3files_policy()
-    # 8. _ensure_agent_runtime_vpc_endpoint_access()
-    return {
-        "file_system_id": "...",
-        "file_system_arn": "...",
-        "access_point_arn": "...",
-        "subnets": [...],
-        "security_groups": [...],
-    }
-```
+#### `create_s3_files_app_data_storage(vpc_info, s3_bucket_name, *, mount_sg_id="", ecs_sg_id="", ecs_task_role_name="")`
+ECS 전용 S3 Files (`app-data/` → `/mnt/app-data`). 마이그레이션 + `prepare_s3files_for_ecs()`.
 
-#### `apply_s3_files_config(app_config, s3_files_info)`
-S3 Files·VPC 키를 `application/config.json` 페이로드에 병합.
+#### `apply_s3_files_config(app_config, s3_files_info, s3_files_app_data_info=None)`
+Session·app-data S3 Files·VPC 키를 `application/config.json` 페이로드에 병합.
 
 #### `create_ecr_repository()` / `build_and_push_docker_image()`
 ECR 리포지토리 생성, ARM64 Docker buildx 빌드·push
@@ -351,10 +334,10 @@ AgentCore Web Search gateway 및 managed web-search 타겟 생성/조회
 | `_ensure_cloudfront_alb_origin_config()` / `_ensure_cloudfront_s3_path_behavior()` | CF 헤더·타임아웃·S3 path |
 | `_ensure_s3_bucket_versioning_enabled()` | S3 bucket versioning Enabled (S3 Files 필수) |
 | `_get_or_create_s3files_sync_role()` | S3 Files sync IAM role |
-| `_get_or_create_s3files_file_system()` | S3 Files file system (prefix `agentcore-sessions/`) |
+| `_get_or_create_s3files_file_system()` | S3 Files FS (prefix별: `agentcore-sessions/` 또는 `app-data/`) |
 | `_ensure_s3files_mount_targets()` | private subnet별 mount target |
 | `_get_or_create_s3files_access_point()` | S3 Files access point |
-| `ensure_ecs_task_s3files_policy()` | ECS task role에 S3 Files mount 권한 |
+| `ensure_ecs_task_s3files_policy()` | ECS task role에 **app-data** S3 Files mount 권한 |
 | `_ensure_agent_runtime_vpc_endpoint_access()` | Runtime SG를 VPC endpoint에 연결 |
 | `_wait_for_s3files_status()` | S3 Files 리소스 available 폴링 |
 | `create_public_subnets()` / `create_private_subnets()` | 서브넷 생성 |

@@ -359,33 +359,49 @@ def _project_agent_runtime_resource_arns(config) -> list:
     return arns
 
 
+# Runtime tools only touch CF-shared prefixes (upload/read artifacts, images, docs).
+# App data (tasks.db, litellm, graph, settings) lives under app-data/ on a
+# separate S3 Files FS that Runtime must never mount or read via S3 API.
+RUNTIME_S3_OBJECT_PREFIXES = ("artifacts/", "images/", "docs/")
+
+# S3 API Deny even if Allow is later widened.
+# - app-data/: ECS tasks.db / litellm / graph / settings (separate FS; never grant)
+# - agentcore-sessions/: checkpoints/skills use s3files: mount, not S3 API
+RUNTIME_S3_DENY_OBJECT_PREFIXES = ("app-data/", "agentcore-sessions/")
+
+
 def _project_s3_resource_arns(config) -> tuple:
-    """Return (bucket_arns, object_arns) for project storage (+ optional vector bucket)."""
-    region = config["region"]
+    """Return (bucket_arns, object_arns, list_prefixes, deny_object_arns).
+
+    Object Allow is limited to ``artifacts/``, ``images/``, ``docs/`` on the
+    project bucket. Vector buckets are not granted — Runtime uses Bedrock
+    Retrieve, not direct S3 Vectors access.
+    """
     account_id = config["accountId"]
     project_name = config.get("projectName", "agentcore")
     s3_bucket = config.get(
         "s3_bucket",
-        f"storage-for-{project_name}-{account_id}-{region}",
+        f"storage-for-{project_name}-{account_id}-{config['region']}",
     )
-    bucket_arns = [f"arn:aws:s3:::{s3_bucket}"]
-    object_arns = [f"arn:aws:s3:::{s3_bucket}/*"]
-
-    # Optional vector / alternate bucket names from config (never account-wide *).
-    for key in ("vector_bucket_name",):
-        extra = (config.get(key) or "").strip()
-        if not extra or extra == s3_bucket:
-            continue
-        bucket_arn = f"arn:aws:s3:::{extra}"
-        if bucket_arn not in bucket_arns:
-            bucket_arns.append(bucket_arn)
-            object_arns.append(f"{bucket_arn}/*")
-
+    # Prefer explicit s3_arn when it points at the project bucket name.
     s3_arn = (config.get("s3_arn") or "").strip()
-    if s3_arn.startswith("arn:aws:s3:::") and s3_arn not in bucket_arns:
-        bucket_arns.append(s3_arn)
-        object_arns.append(f"{s3_arn}/*")
-    return bucket_arns, object_arns
+    if s3_arn.startswith("arn:aws:s3:::"):
+        named = s3_arn[len("arn:aws:s3:::"):].split("/", 1)[0]
+        if named:
+            s3_bucket = named
+
+    bucket_arn = f"arn:aws:s3:::{s3_bucket}"
+    object_arns = [
+        f"{bucket_arn}/{prefix}*" for prefix in RUNTIME_S3_OBJECT_PREFIXES
+    ]
+    list_prefixes: list[str] = []
+    for prefix in RUNTIME_S3_OBJECT_PREFIXES:
+        trimmed = prefix.rstrip("/")
+        list_prefixes.extend([trimmed, f"{trimmed}/*"])
+    deny_object_arns = [
+        f"{bucket_arn}/{prefix}*" for prefix in RUNTIME_S3_DENY_OBJECT_PREFIXES
+    ]
+    return [bucket_arn], object_arns, list_prefixes, deny_object_arns
 
 
 def _project_secret_resource_arns(config) -> list:
@@ -414,7 +430,9 @@ def create_bedrock_agentcore_policy(config):
         config.get("agentcore_gateway_region", "us-east-1"),
     )
     runtime_resource_arns = _project_agent_runtime_resource_arns(config)
-    bucket_arns, object_arns = _project_s3_resource_arns(config)
+    bucket_arns, object_arns, list_prefixes, deny_object_arns = (
+        _project_s3_resource_arns(config)
+    )
     secret_arns = _project_secret_resource_arns(config)
     
     policy_name = f"AmazonBedrockAgentCoreRuntimePolicyFor{projectName}"
@@ -627,13 +645,26 @@ def create_bedrock_agentcore_policy(config):
                 "Resource": "*"
             },
             {
-                "Sid": "ProjectS3Bucket",
+                "Sid": "ProjectS3BucketMeta",
                 "Effect": "Allow",
                 "Action": [
-                    "s3:ListBucket",
                     "s3:GetBucketLocation",
                 ],
                 "Resource": bucket_arns,
+            },
+            {
+                # List only CF-shared prefixes used by Runtime tools.
+                "Sid": "ProjectS3ListAllowedPrefixes",
+                "Effect": "Allow",
+                "Action": [
+                    "s3:ListBucket",
+                ],
+                "Resource": bucket_arns,
+                "Condition": {
+                    "StringLike": {
+                        "s3:prefix": list_prefixes,
+                    }
+                },
             },
             {
                 "Sid": "ProjectS3Objects",
@@ -644,6 +675,20 @@ def create_bedrock_agentcore_policy(config):
                     "s3:DeleteObject",
                 ],
                 "Resource": object_arns,
+            },
+            {
+                # Block S3 API access to app-data (tasks.db, virtual keys) and
+                # session store. Checkpoints still work via s3files: ClientMount.
+                "Sid": "DenySensitiveS3Prefixes",
+                "Effect": "Deny",
+                "Action": [
+                    "s3:GetObject",
+                    "s3:GetObjectVersion",
+                    "s3:PutObject",
+                    "s3:DeleteObject",
+                    "s3:DeleteObjectVersion",
+                ],
+                "Resource": deny_object_arns,
             },
             {
                 "Sid": "VpcNetworkInterface",
