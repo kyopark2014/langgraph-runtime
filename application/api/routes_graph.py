@@ -23,8 +23,8 @@ def user_graph_html_path(user_id: str) -> Path:
 
 
 
-# Marker present in current pattern HTML templates (document search panel).
-_GRAPH_HTML_CURRENT_MARKER = "toggleAskPanel"
+# Marker present in current pattern HTML templates (top-left document search).
+_GRAPH_HTML_CURRENT_MARKER = 'data-doc-search="1"'
 
 
 def user_graph_json_path(user_id: str) -> Path:
