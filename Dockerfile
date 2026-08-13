@@ -31,7 +31,7 @@ RUN pip install --upgrade "setuptools>=83.0.0" \
 COPY . .
 COPY --from=frontend /web/dist /app/application/web/dist
 
-# Knowledge-graph pipeline deps (import name: graphify ← PyPI graphifyy)
+# Knowledge-graph + Wiki sync deps (import name: graphify ← PyPI graphifyy)
 RUN pip install --no-cache-dir -r /app/graph/requirements.txt
 
 RUN chmod +x /app/docker-entrypoint.sh \

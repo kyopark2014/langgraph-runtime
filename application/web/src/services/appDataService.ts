@@ -25,6 +25,7 @@ export const appDataService = {
     config: AppConfig;
     userId: string | null;
     knowledgeGraphEnabled: boolean;
+    graphPattern: string;
   }> {
     try {
       const config = await api.getConfig();
@@ -34,6 +35,7 @@ export const appDataService = {
         config,
         userId,
         knowledgeGraphEnabled: session?.knowledge_graph_enabled ?? true,
+        graphPattern: session?.graph_pattern || "pattern1",
       };
     } catch (error) {
       throw sanitizeError(error, "Failed to load application configuration.");

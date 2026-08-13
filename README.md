@@ -1709,6 +1709,79 @@ owner 스코프와 함께 쓰려면 `andAll`로 조합합니다.
 
 구현 디스패치: [patterns.py](./graph/lib/patterns.py) (`pattern1` \| `pattern2` \| `pattern3`).
 
+## Wiki
+
+**위키 코퍼스**(`raw` / Sources)를 Sync해 만드는 그래프입니다. 채팅 Knowledge Graph(`.session_storage/{user}/graph/`)와 완전히 분리됩니다. 오케스트레이터는 [sync_wiki.py](./application/skills/graphify/scripts/sync_wiki.py), 트리거는 Settings → Wiki → **Sync** (`wiki_jobs.py`)입니다.
+
+### Knowledge Graph와의 차이
+
+| | **Knowledge Graph** | **Wiki** |
+|--|---------------------|----------|
+| 원본 | Agent 대화 (`tasks.db`) | `raw` / Sources / 업로드 문서 |
+| 루트 | `.session_storage/{user}/graph/` | `.session_storage/{user}/wiki/` |
+| 산출 | `out/graph.html` · `graph.json` | `wiki/graphify-out/app-graph.html` · `graph.json` |
+| API | `GET /api/graph`, `POST /api/graph/query` | `GET /api/wiki/graph`, `POST /api/wiki/query` |
+| 갱신 | Settings → **Knowledge** → Sync | Settings → Wiki → **Sync** |
+| 보기 | Settings → Knowledge → **Graph** / 브랜드 클릭 | Settings → Wiki → **Graph** |
+| Agent MCP | **`graph memory`** → `recall_graph_memory` | **`wiki`** → `recall_wiki` |
+
+시각화 패턴(Force Atlas / Neo4j Explore / Holistic View)과 문서검색 UI는 Knowledge Graph와 공통입니다. Wiki 패턴은 `graphify-out/.wiki_graph_pattern`에 저장되며, 패턴 전환 시 **재추출 없이 HTML만** 다시 생성합니다.
+
+### 폴더 위치
+
+| 역할 | 경로 |
+|------|------|
+| Wiki 루트 | `.session_storage/{user}/wiki/` (로그인 사용자별) |
+| Inbox | `{wiki}/raw/` — 넣고 싶은 원본을 모음 |
+| Sources | Settings → Wiki → Configure (최대 3개, `{wiki}/wiki_sources.json`) |
+| 산출물 | `{wiki}/graphify-out/` |
+| 앱용 HTML | `graphify-out/app-graph.html` → `GET /api/wiki/graph` |
+| JSON | `graphify-out/graph.json` |
+
+```text
+application/.session_storage/{user}/wiki/
+├── raw/                   # 논문·노트·PDF·URL 수집본 (inbox)
+├── wiki_sources.json      # Sync Sources · URL · 업로드 이력
+└── graphify-out/
+    ├── converted/         # PDF/Office → markdown 변환본
+    ├── graph.json
+    ├── GRAPH_REPORT.md
+    ├── app-graph.html     # 앱 Wiki Graph UI
+    └── cache/             # SHA256 캐시 (변경된 파일만 재처리)
+```
+
+### 문서 추가 (`raw` · Sources · URL)
+
+Settings → Wiki → **Configure**에서:
+
+- **문서 추가** — 파일 선택 후 저장 시 `{wiki}/raw/`에 복사
+- **Sources** — 로컬 폴더 최대 3개
+- **URL** — 추가 즉시 `{wiki}/raw`에 저장
+
+### Agent MCP (`wiki`)
+
+채팅에서 Wiki 코퍼스를 검색하려면 Settings → **MCP**에서 **`wiki`** 를 켭니다.
+
+| MCP | 도구 | 대상 | 동일 HTTP API | 구현 |
+|-----|------|------|---------------|------|
+| **`wiki`** | `recall_wiki(question, mode?, budget?)` | `{user}/wiki/graphify-out/graph.json` | `POST /api/wiki/query` | `runtime_agent/langgraph/mcp_wiki.py` |
+| **`graph memory`** | `recall_graph_memory(...)` | `{user}/graph/out/graph.json` | `POST /api/graph/query` | `mcp_graph_memory.py` |
+
+등록: `application/mcp.list` · `runtime_agent/langgraph/mcp.list` + `mcp_config.py` (`"wiki"` → `mcp_server_wiki.py`).
+
+### API 요약
+
+| API | 역할 |
+|-----|------|
+| `GET /api/wiki/status` | Sync 상태 |
+| `POST /api/wiki/sync` | 백그라운드 Sync enqueue |
+| `GET /api/wiki/graph` | Wiki Graph HTML |
+| `POST /api/wiki/query` | Wiki 문서검색 |
+| `GET/PUT /api/wiki/sources` | Sources 조회·저장 |
+| `POST /api/wiki/raw` | 문서 업로드 → `raw/` |
+| `POST /api/wiki/urls` | URL ingest |
+| `PATCH /api/wiki/pattern` | 시각화 패턴 |
+
 ## 배포하기
 
 아래와 같이 EC2를 이용해 배포 환경을 구성합니다.

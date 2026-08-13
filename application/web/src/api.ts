@@ -59,14 +59,63 @@ export interface GraphStatus {
   status: "idle" | "queued" | "running" | "ready" | "error" | "skipped_cooldown" | "disabled" | string;
   enabled?: boolean;
   error?: string | null;
+  message?: string | null;
   last_success_at?: string | null;
   cooldown_seconds?: number;
   next_eligible_at?: string | null;
 }
 
+export interface WikiStatus {
+  wiki_dir: string;
+  sources?: string[];
+  max_sources?: number;
+  exists: boolean;
+  path: string | null;
+  storage?: string;
+  status: "idle" | "queued" | "running" | "ready" | "error" | "unchanged" | string;
+  pattern?: GraphPattern | string;
+  error?: string | null;
+  message?: string | null;
+  last_success_at?: string | null;
+  pid?: number | null;
+}
+
+export interface WikiSourcesConfig {
+  wiki_dir: string;
+  folders: string[];
+  urls: string[];
+  max_sources: number;
+}
+
+export interface WikiUrlIngestResult {
+  wiki_dir: string;
+  url: string;
+  path: string;
+  urls: string[];
+  folders: string[];
+  max_sources: number;
+}
+
+export interface WikiRawUploadResult {
+  wiki_dir: string;
+  raw_dir: string;
+  count: number;
+  saved: Array<{ name: string; path: string; bytes: number }>;
+}
+
+export interface WikiBrowseResult {
+  path: string;
+  parent: string | null;
+  dirs: { name: string; path: string }[];
+  shortcuts: { name: string; path: string }[];
+}
+
+export type GraphPattern = "pattern1" | "pattern2" | "pattern3";
+
 export interface SessionInfo {
   user_id: string;
   knowledge_graph_enabled?: boolean;
+  graph_pattern?: GraphPattern | string;
 }
 
 export const api = {
@@ -75,6 +124,63 @@ export const api = {
     request<GraphStatus>(`/api/graph/rebuild${force ? "?force=1" : ""}`, {
       method: "POST",
     }),
+  getWikiStatus: () => request<WikiStatus>("/api/wiki/status"),
+  syncWiki: (full = false) =>
+    request<WikiStatus>(`/api/wiki/sync${full ? "?full=1" : ""}`, {
+      method: "POST",
+    }),
+  setWikiGraphPattern: (pattern: GraphPattern | string) =>
+    request<WikiStatus>("/api/wiki/pattern", {
+      method: "PATCH",
+      body: JSON.stringify({ pattern }),
+    }),
+  getWikiSources: () => request<WikiSourcesConfig>("/api/wiki/sources"),
+  putWikiSources: (body: { folders: string[] }) =>
+    request<WikiSourcesConfig>("/api/wiki/sources", {
+      method: "PUT",
+      body: JSON.stringify(body),
+    }),
+  ingestWikiUrl: (url: string) =>
+    request<WikiUrlIngestResult>("/api/wiki/urls", {
+      method: "POST",
+      body: JSON.stringify({ url }),
+    }),
+  uploadWikiRawFiles: async (files: File[]): Promise<WikiRawUploadResult> => {
+    if (!files.length) {
+      throw new Error("업로드할 파일이 없습니다.");
+    }
+    uiLog("wiki:raw upload start", { count: files.length });
+    const form = new FormData();
+    for (const file of files) {
+      form.append("files", file, file.name);
+    }
+    const res = await fetch("/api/wiki/raw", {
+      method: "POST",
+      credentials: "include",
+      body: form,
+    });
+    if (!res.ok) {
+      const text = await res.text();
+      uiError("wiki:raw upload failed", { status: res.status, body: text });
+      let message = text || res.statusText;
+      try {
+        const parsed = JSON.parse(text) as { detail?: string };
+        if (typeof parsed.detail === "string" && parsed.detail) {
+          message = parsed.detail;
+        }
+      } catch {
+        // keep raw text
+      }
+      throw new Error(message);
+    }
+    const data = (await res.json()) as WikiRawUploadResult;
+    uiLog("wiki:raw upload complete", data);
+    return data;
+  },
+  browseWikiSources: (path?: string) => {
+    const q = path ? `?path=${encodeURIComponent(path)}` : "";
+    return request<WikiBrowseResult>(`/api/wiki/browse${q}`);
+  },
   getSession: () => request<SessionInfo | null>("/api/session"),
   login: (username: string, password: string) =>
     request<SessionInfo>("/api/session/login", {
@@ -82,7 +188,10 @@ export const api = {
       body: JSON.stringify({ username, password }),
     }),
   clearSession: () => request<void>("/api/session", { method: "DELETE" }),
-  patchSessionSettings: (body: { knowledge_graph_enabled?: boolean }) =>
+  patchSessionSettings: (body: {
+    knowledge_graph_enabled?: boolean;
+    graph_pattern?: GraphPattern | string;
+  }) =>
     request<SessionInfo>("/api/session/settings", {
       method: "PATCH",
       body: JSON.stringify(body),
