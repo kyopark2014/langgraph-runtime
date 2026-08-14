@@ -53,3 +53,4 @@ langgraph
 langgraph-supervisor
 langgraph-swarm
 openai>=2.41.0
+pymupdf
