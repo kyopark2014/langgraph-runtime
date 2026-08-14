@@ -54,9 +54,16 @@ async def lifespan(app: FastAPI):
     restore_tasks_db()
     init_db()
     if persistence_enabled():
-        logger.info("Task store persistence enabled: %s", persistent_db_path())
+        logger.info(
+            "Global task DB persistence enabled: %s "
+            "(per-user tasks/messages use session_storage lazy restore)",
+            persistent_db_path(),
+        )
     else:
-        logger.info("Task store using local SQLite only")
+        logger.info(
+            "Task store using local SQLite; "
+            "per-user DBs under session_storage/{user}/{user}.db",
+        )
     yield
     flush_persist()
     logger.info("Task store shutdown persist complete")
