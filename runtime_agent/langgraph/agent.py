@@ -170,15 +170,6 @@ async def agent_langgraph(payload):
     logger.info(f"guardrail_enabled: {chat.guardrail_enabled}")
     logger.info(f"memory_enabled: {chat.memory_enabled}")
 
-    # Auto-attach graph memory when Knowledge Graph is on (same path as UI doc search).
-    effective_user_id = user_id if user_id else chat.user_id
-    if (
-        utils.is_knowledge_graph_enabled(effective_user_id)
-        and "graph memory" not in mcp_servers
-    ):
-        mcp_servers = mcp_servers + ["graph memory"]
-        logger.info("knowledge_graph_enabled: appended 'graph memory' MCP server")
-
     runtime_session_id = payload.get("runtime_session_id")
     if not runtime_session_id:
         runtime_session_id = chat._runtime_session_id()
