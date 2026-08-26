@@ -10,16 +10,55 @@ here for Cognito UI and same-origin graph iframe embedding.
 
 from __future__ import annotations
 
+import json
+import logging
+import os
+
 from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
+logger = logging.getLogger(__name__)
+
+
+def _s3_connect_src_hosts() -> str:
+    """Allow browser→S3 presigned PUT/GET used by Load-files / Wiki / RAG uploads.
+
+    Without these, CSP blocks ``fetch(presignedUrl)`` as ``Failed to fetch``.
+    Host wildcards only match one DNS label, so regional path-style and
+    virtual-hosted forms are listed explicitly from config.json.
+    """
+    region = "us-west-2"
+    bucket = ""
+    try:
+        cfg_path = os.path.join(os.path.dirname(__file__), "config.json")
+        with open(cfg_path, encoding="utf-8") as f:
+            cfg = json.load(f)
+        region = (cfg.get("region") or region).strip() or region
+        bucket = (cfg.get("s3_bucket") or "").strip()
+    except Exception:
+        logger.debug("CSP S3 hosts: using defaults (config.json unread)", exc_info=True)
+
+    hosts = [
+        f"https://s3.{region}.amazonaws.com",
+        f"https://*.s3.{region}.amazonaws.com",
+        "https://*.s3.amazonaws.com",
+        "https://s3.amazonaws.com",
+    ]
+    if bucket:
+        hosts.append(f"https://{bucket}.s3.{region}.amazonaws.com")
+        hosts.append(f"https://{bucket}.s3.amazonaws.com")
+    return " ".join(hosts)
+
+
 # frame-src includes 'self' so Knowledge/Wiki Graph modals can iframe HTML.
+# connect-src includes S3 so Load-files / Wiki / RAG can PUT directly to
+# presigned URLs.
 _CONTENT_SECURITY_POLICY = (
     "default-src 'self'; "
     "script-src 'self'; "
     "style-src 'self' 'unsafe-inline'; "
     "img-src 'self' data: blob: https:; "
     "font-src 'self' data:; "
-    "connect-src 'self'; "
+    f"connect-src 'self' {_s3_connect_src_hosts()}; "
     "frame-src 'self'; "
     "frame-ancestors 'none'; "
     "base-uri 'self'; "

@@ -96,7 +96,7 @@ export function ChatInput({
     clearUploadError,
     uploadImageFiles,
     loadWorkspaceFiles,
-    uploadRagFile,
+    uploadRagFiles,
     uploadWikiFiles,
     removeAttachment,
     removeLoadedFile,
@@ -260,10 +260,10 @@ export function ChatInput({
   }
 
   async function onRagFileSelected(e: React.ChangeEvent<HTMLInputElement>) {
-    const file = e.target.files?.[0];
+    const files = Array.from(e.target.files ?? []);
     e.target.value = "";
-    if (!file) return;
-    await uploadRagFile(file, onRagUploadComplete);
+    if (files.length === 0) return;
+    await uploadRagFiles(files, onRagUploadComplete);
   }
 
   async function onWikiFileSelected(e: React.ChangeEvent<HTMLInputElement>) {
@@ -393,7 +393,7 @@ export function ChatInput({
               <span className="chat-add-menu-text">
                 <span className="chat-add-menu-label">Upload to RAG</span>
                 <span className="chat-add-menu-desc">
-                  S3에 업로드하고 Knowledge Base 동기화
+                  S3로 직접 업로드하고 Knowledge Base 동기화
                 </span>
               </span>
             </button>
@@ -423,7 +423,7 @@ export function ChatInput({
               <span className="chat-add-menu-text">
                 <span className="chat-add-menu-label">Upload to Wiki</span>
                 <span className="chat-add-menu-desc">
-                  wiki/raw에 업로드하고 Wiki Sync
+                  S3로 직접 업로드 후 Wiki Sync
                 </span>
               </span>
             </button>
@@ -562,6 +562,7 @@ export function ChatInput({
           type="file"
           className="chat-file-input"
           accept={RAG_ACCEPT}
+          multiple
           onChange={onRagFileSelected}
           tabIndex={-1}
           aria-hidden="true"
