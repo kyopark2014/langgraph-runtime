@@ -25,6 +25,11 @@ RUN pip install networkx
 RUN pip install requests beautifulsoup4
 RUN pip install python-docx openpyxl reportlab matplotlib pandas finance-datareader pypdf pdfplumber pyyaml defusedxml lxml
 RUN pip install colorama rich
+RUN pip install python-dotenv
+
+# LangGraph runtime + graph embedding lib (hybrid wiki search on AgentCore)
+COPY runtime_agent/langgraph/ .
+COPY graph/lib/ graph/lib/
 
 # Skills that use docx-js / pptxgenjs / sharp via bash/node (local install for require())
 RUN npm install docx pptxgenjs sharp
@@ -34,15 +39,14 @@ ENV NODE_PATH=/app/node_modules
 RUN pip install aws-opentelemetry-distro>=0.10.0
 RUN pip install opentelemetry-instrumentation-langchain
 
-COPY . .
-
 RUN useradd --create-home --uid 10001 --shell /usr/sbin/nologin appuser \
     && chown -R appuser:appuser /app
 
 USER appuser
 
-# Add the current directory to Python path
-ENV PYTHONPATH=/app
+# Add runtime + graph/lib to Python path (graph_embeddings → lib.embeddings)
+ENV PYTHONPATH=/app:/app/graph
+ENV APP_CONFIG_PATH=/app/config.json
 # Minimal config (MCP/LangGraph agent without full RAG keys in config.json)
 ENV ALLOW_MISSING_RAG_CONFIG=1
 ENV SESSION_STORAGE_DIR=/mnt/workspace
