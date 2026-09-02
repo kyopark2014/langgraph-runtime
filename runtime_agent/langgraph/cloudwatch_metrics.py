@@ -115,7 +115,7 @@ def _agent_runtime_name(project_name: str) -> str:
 
 def _load_runtime_context() -> dict[str, str]:
     project_name = "langgraph-runtime"
-    runtime_name = _agent_runtime_name("langgraph-runtime")
+    runtime_name = _agent_runtime_name("agentic-work")
     region = os.environ.get("AWS_REGION") or os.environ.get("AWS_DEFAULT_REGION") or "us-west-2"
 
     try:
@@ -185,8 +185,12 @@ def extract_token_usage(message: Any) -> dict[str, int]:
         )
         details = usage_metadata.get("input_token_details")
         if isinstance(details, dict):
-            usage["cache_read"] = int(details.get("cache_read") or 0)
-            usage["cache_creation"] = int(details.get("cache_creation") or 0)
+            usage["cache_read"] = int(
+                details.get("cache_read") or details.get("cached_tokens") or 0
+            )
+            usage["cache_creation"] = int(
+                details.get("cache_creation") or details.get("cache_write_tokens") or 0
+            )
 
     response_metadata = getattr(message, "response_metadata", None)
     if isinstance(response_metadata, dict):
@@ -446,7 +450,6 @@ def _custom_model_metric_query(
             }
         ]
     ]
-
 
 
 def _tokens_by_model_pie_metrics(
