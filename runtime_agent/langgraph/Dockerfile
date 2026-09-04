@@ -14,9 +14,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 RUN pip install --upgrade "setuptools>=83.0.0" \
  && pip install "urllib3>=2.7.0" boto3 botocore --upgrade
-RUN pip install langchain_aws langchain langchain_community langgraph langchain-openai "openai>=2.41.0" aws-bedrock-token-generator
+RUN pip install langchain_aws "langchain[mcp]>=1.4.0" langchain_community "langgraph>=1.2.11" langchain-openai "openai>=2.41.0" aws-bedrock-token-generator
 RUN pip install langgraph-checkpoint-sqlite aiosqlite
-# MCP 2.x MCPServer + SigV4 (httpx2); preinstall aws-documentation to skip uvx cold start
+# MCP 2.x MCPServer + SigV4 (httpx2); langchain[mcp] pulls fastmcp; preinstall aws-documentation
 RUN pip install "mcp>=2.1.1" httpx2 awslabs.aws-documentation-mcp-server
 RUN pip install "bedrock-agentcore>=1.18.1" uv
 RUN pip install Pillow pytz tavily-python langchain-text-splitters
