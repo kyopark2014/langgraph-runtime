@@ -3,23 +3,23 @@ FROM --platform=linux/arm64 python:3.13-slim
 WORKDIR /app
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    curl \
-    nodejs \
-    npm \
-    # Hangul glyphs for matplotlib / ReportLab in execute_code
-    fonts-nanum \
-    fontconfig \
-    && fc-cache -f \
-    && rm -rf /var/lib/apt/lists/*
+ curl \
+ nodejs \
+ npm \
+ # Hangul glyphs for matplotlib / ReportLab in execute_code
+ fonts-nanum \
+ fontconfig \
+ && fc-cache -f \
+ && rm -rf /var/lib/apt/lists/*
 
 RUN pip install --upgrade "setuptools>=83.0.0" \
-    && pip install "urllib3>=2.7.0" boto3 botocore --upgrade
+ && pip install "urllib3>=2.7.0" boto3 botocore --upgrade
 RUN pip install langchain_aws langchain langchain_community langgraph langchain-openai "openai>=2.41.0" aws-bedrock-token-generator
 RUN pip install langgraph-checkpoint-sqlite aiosqlite
-# Keep FastMCP (mcp.server.fastmcp). mcp 2.x removed it; pin 1.x for stdio MCP servers.
-RUN pip install "mcp>=1.9.0,<2" langchain-mcp-adapters
+# MCP 2.x MCPServer (mcp.server.mcpserver).
+RUN pip install "mcp>=2.1.1"
 RUN pip install "bedrock-agentcore>=1.18.1" uv
-RUN pip install "mcp>=1.9.0,<2"
+RUN pip install "mcp>=2.1.1"
 RUN pip install Pillow pytz tavily-python langchain-text-splitters
 RUN pip install networkx
 RUN pip install requests beautifulsoup4
@@ -42,7 +42,7 @@ RUN pip install aws-opentelemetry-distro>=0.10.0
 RUN pip install opentelemetry-instrumentation-langchain
 
 RUN useradd --create-home --uid 10001 --shell /usr/sbin/nologin appuser \
-    && chown -R appuser:appuser /app
+ && chown -R appuser:appuser /app
 
 USER appuser
 

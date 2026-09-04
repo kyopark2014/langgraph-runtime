@@ -84,10 +84,8 @@ def load_config(mcp_type):
             "mcpServers": {
                 "awslabs.aws-documentation-mcp-server": {
                     "command": "uvx",
-                    # mcp 2.x removed mcp.server.fastmcp; pin 1.x for this server.
-                    "args": [
-                        "--with",
-                        "mcp>=1.9.0,<2",
+                    # mcp 2.x removed mcp.server.mcpserver; pin 1.x for this server.
+                    "args": [,
                         "awslabs.aws-documentation-mcp-server@latest",
                     ],
                     "env": {

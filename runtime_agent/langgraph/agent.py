@@ -5,6 +5,7 @@ import traceback
 import chat
 import utils
 import httpx
+import httpx2
 import boto3
 from datetime import datetime, timezone
 from urllib.parse import urlparse
@@ -46,7 +47,7 @@ def _sigv4_region_for_bedrock_agentcore_url(url: str) -> str:
 
 def patched_init(self, *args, **kwargs):
     # Add SigV4 signing event hook if needed
-    async def sign_request(request: httpx.Request) -> None:
+    async def sign_request(request: httpx2.Request) -> None:
         """Sign the request with AWS SigV4 including the body"""
         url_str = str(request.url)
         # Only sign requests to bedrock-agentcore runtime endpoints in this region.
