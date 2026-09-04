@@ -16,10 +16,9 @@ RUN pip install --upgrade "setuptools>=83.0.0" \
  && pip install "urllib3>=2.7.0" boto3 botocore --upgrade
 RUN pip install langchain_aws langchain langchain_community langgraph langchain-openai "openai>=2.41.0" aws-bedrock-token-generator
 RUN pip install langgraph-checkpoint-sqlite aiosqlite
-# MCP 2.x MCPServer (mcp.server.mcpserver).
-RUN pip install "mcp>=2.1.1"
+# MCP 2.x MCPServer + SigV4 (httpx2); preinstall aws-documentation to skip uvx cold start
+RUN pip install "mcp>=2.1.1" httpx2 awslabs.aws-documentation-mcp-server
 RUN pip install "bedrock-agentcore>=1.18.1" uv
-RUN pip install "mcp>=2.1.1"
 RUN pip install Pillow pytz tavily-python langchain-text-splitters
 RUN pip install networkx
 RUN pip install requests beautifulsoup4
