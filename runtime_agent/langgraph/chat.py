@@ -2154,6 +2154,10 @@ async def create_agent(
 
     await ensure_checkpointer()
 
+    # Reset server mapping whenever tools are rebuilt.
+    global mcp_tool_servers
+    mcp_tool_servers = {}
+
     # builtin tools
     tools = langgraph_agent.get_builtin_tools()
     logger.info(f"builtin_tools count: {len(tools)}")
@@ -2224,9 +2228,10 @@ async def create_agent(
             mcp_tools = wrap_tavily_mcp_tools(mcp_tools)
 
             for tool in mcp_tools:
-                logger.info(f"mcp_tool: {tool.name}")
+                logger.info(f"mcp_tool: {tool.name} (from {server_name})")
                 if tool.name not in [t.name for t in tools]:
                     tools.append(tool)
+                    mcp_tool_servers[tool.name] = server_name
                 else:
                     logger.info(f"mcp_tool of {tool.name} already in tools")
         except Exception as e:
@@ -2288,6 +2293,8 @@ async def create_agent(
 app = None
 agent_config = None
 active_mcp_servers = []
+# tool_name -> MCP server name (populated in create_agent)
+mcp_tool_servers: dict[str, str] = {}
 active_skills = []
 current_id = None
 _active_agent_session = None
